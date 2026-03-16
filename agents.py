@@ -120,4 +120,4 @@ if __name__ == "__main__":
     
     robot_rouge = redAgent(dummy_model)
     print(f"Robot {robot_rouge.color} créé, peut aller en : {robot_rouge.allowed_zones}")
-    print("\n--- ✅ agents.py fonctionne correctement ---")
+    print("\n--- agents.py fonctionne correctement ---")

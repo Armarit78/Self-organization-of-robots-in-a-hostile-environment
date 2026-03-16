@@ -126,7 +126,7 @@ if __name__ == "__main__":
     try:
         # On essaie d'instancier la mission avec une petite carte
         mission = RobotMission(width=9, height=6, initial_wastes=5, nb_green=1, nb_yellow=1, nb_red=1)
-        print("✅ Modèle RobotMission créé avec succès !")
+        print("Modèle RobotMission créé avec succès !")
         
         # Selon que tu as encore l'ancien code (schedule) ou le nouveau (agents)
         nb_agents = len(mission.agents) if hasattr(mission, "agents") else len(mission.schedule.agents)
@@ -135,10 +135,10 @@ if __name__ == "__main__":
         print("\nSimulation de 2 tours (steps)...")
         mission.step()
         mission.step()
-        print("✅ Simulations réussies !")
-        print("\n--- ✅ model.py fonctionne correctement ---")
+        print("Simulations réussies !")
+        print("\n--- model.py fonctionne correctement ---")
         
     except AttributeError as e:
-        print(f"\n❌ ERREUR ATTENDUE lièe à Mesa : {e}")
-        print("👉 Ton fichier 'model.py' utilise encore l'ancienne syntaxe mesa.time.")
-        print("👉 Pour corriger le modèle, il va falloir enlever self.schedule et utiliser self.agents (Mesa 3).")
+        print(f"\nERREUR ATTENDUE lièe à Mesa : {e}")
+        print("Ton fichier 'model.py' utilise encore l'ancienne syntaxe mesa.time.")
+        print("Pour corriger le modèle, il va falloir enlever self.schedule et utiliser self.agents (Mesa 3).")
