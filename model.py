@@ -44,9 +44,19 @@ class RobotMission:
 
         self.stored_red_waste = 0
 
+        self.history = {
+            "steps": [],
+            "green": [],
+            "yellow": [],
+            "red": [],
+            "stored_red": []
+        }
+
         self._create_environment()
         self._create_initial_wastes(n_initial_green_wastes)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
+
+        self.record_history()
 
     # ---------------------------------------------------------
     # Environment construction
@@ -288,6 +298,7 @@ class RobotMission:
         for agent in self.agents:
             agent.step_agent()
         self.step_count += 1
+        self.record_history()
 
     # ---------------------------------------------------------
     # Statistics / end condition
@@ -295,10 +306,18 @@ class RobotMission:
 
     def count_wastes_on_grid(self):
         counts = {"green": 0, "yellow": 0, "red": 0}
-        for waste_list in self.waste_grid.values():
-            for waste in waste_list:
-                counts[waste.waste_type] += 1
+        for wastes in self.waste_grid.values():
+            for w in wastes:
+                counts[w.waste_type] += 1
         return counts
+
+    def record_history(self):
+        counts = self.count_wastes_on_grid()
+        self.history["steps"].append(self.step_count)
+        self.history["green"].append(counts["green"])
+        self.history["yellow"].append(counts["yellow"])
+        self.history["red"].append(counts["red"])
+        self.history["stored_red"].append(self.stored_red_waste)
 
     def is_finished(self):
         counts = self.count_wastes_on_grid()
