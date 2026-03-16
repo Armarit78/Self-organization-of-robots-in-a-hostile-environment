@@ -72,8 +72,8 @@ class RobotMission(mesa.Model):
 
     def do(self, agent, action):
         """
-        Exécute l'action de l'agent si elle est faisable, puis renvoie les percepts[cite: 64, 65, 74].
-        L'action peut être un dictionnaire ou une chaîne de caractères[cite: 45].
+        Exécute l'action de l'agent si elle est faisable, puis renvoie les percepts.
+        L'action peut être un dictionnaire ou une chaîne de caractères.
         """
         # Exemple d'implémentation basique de mouvement
         if isinstance(action, dict) and action.get("type") == "move":
