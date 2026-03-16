@@ -45,8 +45,8 @@ def deliberate(knowledge):
 
 class GenericRobot(mesa.Agent):
     """Classe parente pour mutualiser le comportement des robots."""
-    def __init__(self, unique_id, model):
-        super().__init__(unique_id, model)
+    def __init__(self, model):
+        super().__init__(model)
         # Représentation des croyances et connaissances (imposé par le sujet)
         self.knowledge = {
             "inventory": [], # Pour stocker les déchets ramassés
@@ -73,19 +73,51 @@ class GenericRobot(mesa.Agent):
 
 
 class greenAgent(GenericRobot):
-    def __init__(self, unique_id, model):
-        super().__init__(unique_id, model)
+    def __init__(self, model):
+        super().__init__(model)
         self.color = "green"
         self.allowed_zones = ["z1"] # Ne peut pas dépasser z1
 
 class yellowAgent(GenericRobot):
-    def __init__(self, unique_id, model):
-        super().__init__(unique_id, model)
+    def __init__(self, model):
+        super().__init__(model)
         self.color = "yellow"
         self.allowed_zones = ["z1", "z2"] # Peut aller en z1 et z2
 
 class redAgent(GenericRobot):
-    def __init__(self, unique_id, model):
-        super().__init__(unique_id, model)
+    def __init__(self, model):
+        super().__init__(model)
         self.color = "red"
         self.allowed_zones = ["z1", "z2", "z3"] # Peut aller partout
+
+if __name__ == "__main__":
+    print("--- Test indépendant de agents.py ---")
+    
+    # 1. Test des fonctions de raisonnement (logique pure)
+    print("\n[1] Test de update()")
+    knowledge = {"inventory": [], "percepts": {}, "adjacent_cells": []}
+    percepts_mock = {(1, 1): ["Waste"], (1, 2): []}
+    
+    knowledge = update(knowledge, percepts_mock)
+    print(f"Cellules adjacentes mises à jour : {knowledge['adjacent_cells']}")
+    assert len(knowledge["adjacent_cells"]) == 2, "Erreur dans update()"
+    
+    print("\n[2] Test de deliberate()")
+    action = deliberate(knowledge)
+    print(f"Action choisie par l'agent : {action}")
+    assert action["type"] in ["move", "idle"], "Erreur dans deliberate()"
+
+    # 2. Test des classes avec un faux modèle adapté à Mesa 3
+    print("\n[3] Test de création des agents")
+    class MockModel(mesa.Model):
+        def __init__(self):
+            super().__init__()
+            
+    dummy_model = MockModel()
+    
+    robot_vert = greenAgent(dummy_model)
+    print(f"Robot {robot_vert.color} créé, peut aller en : {robot_vert.allowed_zones}")
+    
+    robot_rouge = redAgent(dummy_model)
+    print(f"Robot {robot_rouge.color} créé, peut aller en : {robot_rouge.allowed_zones}")
+    print("\n--- ✅ agents.py fonctionne correctement ---")

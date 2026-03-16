@@ -6,15 +6,15 @@ from agents import greenAgent, yellowAgent, redAgent
 # Fonctions pour le DataCollector
 def compute_green_wastes(model):
     """Compte le nombre de déchets verts restants dans l'environnement."""
-    wastes = [agent for agent in model.schedule.agents if isinstance(agent, Waste) and agent.color == "green"]
+    wastes = [agent for agent in model.agents if isinstance(agent, Waste) and agent.color == "green"]
     return len(wastes)
 
 def compute_yellow_wastes(model):
-    wastes = [agent for agent in model.schedule.agents if isinstance(agent, Waste) and agent.color == "yellow"]
+    wastes = [agent for agent in model.agents if isinstance(agent, Waste) and agent.color == "yellow"]
     return len(wastes)
 
 def compute_red_wastes(model):
-    wastes = [agent for agent in model.schedule.agents if isinstance(agent, Waste) and agent.color == "red"]
+    wastes = [agent for agent in model.agents if isinstance(agent, Waste) and agent.color == "red"]
     return len(wastes)
 
 
@@ -22,7 +22,6 @@ class RobotMission(mesa.Model):
     def __init__(self, width=15, height=10, initial_wastes=10, nb_green=5, nb_yellow=5, nb_red=5):
         super().__init__()
         self.grid = mesa.space.MultiGrid(width, height, torus=False)
-        self.schedule = mesa.time.RandomActivation(self)
         self.current_id = 0
 
         # Configuration du DataCollector comme dans votre notebook
@@ -48,48 +47,42 @@ class RobotMission(mesa.Model):
                 else:
                     zone = "z3"
 
-                rad_agent = Radioactivity(self.next_id(), self, zone)
+                rad_agent = Radioactivity(self, zone)
                 self.grid.place_agent(rad_agent, (x, y))
-                self.schedule.add(rad_agent)
 
         # 2. Placement de la zone de dépôt des déchets tout à l'Est
         disposal_y = random.randrange(height)
-        disposal_zone = WasteDisposalZone(self.next_id(), self)
+        disposal_zone = WasteDisposalZone(self)
         self.grid.place_agent(disposal_zone, (width - 1, disposal_y))
-        self.schedule.add(disposal_zone)
 
         # 3. Placement des déchets verts initiaux dans z1
         for _ in range(initial_wastes):
             x = random.randrange(z1_max)
             y = random.randrange(height)
-            waste = Waste(self.next_id(), self, color="green")
+            waste = Waste(self, color="green")
             self.grid.place_agent(waste, (x, y))
-            self.schedule.add(waste)
             
         # 4. Ajouter les robots
         # Le robot vert ne peut pas dépasser la zone z1 
         for _ in range(nb_green):
-            robot = greenAgent(self.next_id(), self)
+            robot = greenAgent(self)
             x = random.randrange(z1_max) # Placement uniquement dans z1
             y = random.randrange(height)
             self.grid.place_agent(robot, (x, y))
-            self.schedule.add(robot)
 
         # Le robot jaune peut se déplacer dans les zones z1 et z2 
         for _ in range(nb_yellow):
-            robot = yellowAgent(self.next_id(), self)
+            robot = yellowAgent(self)
             x = random.randrange(z2_max) # Placement dans z1 ou z2
             y = random.randrange(height)
             self.grid.place_agent(robot, (x, y))
-            self.schedule.add(robot)
 
         # Le robot rouge peut se déplacer dans les zones z1, z2 et z3 
         for _ in range(nb_red):
-            robot = redAgent(self.next_id(), self)
+            robot = redAgent(self)
             x = random.randrange(width) # Placement n'importe où sur la grille
             y = random.randrange(height)
             self.grid.place_agent(robot, (x, y))
-            self.schedule.add(robot)
 
         self.running = True
 
@@ -110,7 +103,7 @@ class RobotMission(mesa.Model):
             target_waste = action.get("waste")
             if target_waste in self.grid.get_cell_list_contents([agent.pos]):
                 self.grid.remove_agent(target_waste)
-                self.schedule.remove(target_waste)
+                target_waste.remove()
                 # Le robot devrait stocker le déchet dans son inventaire de son côté
         
         # Générer les percepts : infos sur les cases adjacentes
@@ -125,4 +118,27 @@ class RobotMission(mesa.Model):
     def step(self):
         # Récolte des données à chaque tour, comme dans le notebook
         self.datacollector.collect(self)
-        self.schedule.step()
+        self.agents.shuffle_do("step")
+
+if __name__ == "__main__":
+    print("--- Test indépendant de model.py ---")
+    
+    try:
+        # On essaie d'instancier la mission avec une petite carte
+        mission = RobotMission(width=9, height=6, initial_wastes=5, nb_green=1, nb_yellow=1, nb_red=1)
+        print("✅ Modèle RobotMission créé avec succès !")
+        
+        # Selon que tu as encore l'ancien code (schedule) ou le nouveau (agents)
+        nb_agents = len(mission.agents) if hasattr(mission, "agents") else len(mission.schedule.agents)
+        print(f"Nombre d'agents placés : {nb_agents}")
+        
+        print("\nSimulation de 2 tours (steps)...")
+        mission.step()
+        mission.step()
+        print("✅ Simulations réussies !")
+        print("\n--- ✅ model.py fonctionne correctement ---")
+        
+    except AttributeError as e:
+        print(f"\n❌ ERREUR ATTENDUE lièe à Mesa : {e}")
+        print("👉 Ton fichier 'model.py' utilise encore l'ancienne syntaxe mesa.time.")
+        print("👉 Pour corriger le modèle, il va falloir enlever self.schedule et utiliser self.agents (Mesa 3).")
