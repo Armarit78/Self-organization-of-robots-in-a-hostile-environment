@@ -8,320 +8,728 @@
 import random
 
 
-class BaseRobotAgent:
-    """
-    Common parent class for all robot agents.
-    Each concrete class must define its own robot_type.
-    """
+def manhattan(a, b):
+    return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
+
+class BaseRobotAgent:
     def __init__(self, unique_id, model):
         self.unique_id = unique_id
         self.model = model
         self.pos = (0, 0)
         self.robot_type = "base"
+        self.inventory = []
 
-        # Subject requirement:
-        # self.knowledge represents beliefs/knowledge of the agent
         self.knowledge = {
             "self_id": unique_id,
             "robot_type": self.robot_type,
             "position": None,
             "inventory": [],
-            "allowed_zones": [],
             "visible_cells": {},
-            "known_wastes": {},       # {pos: [waste_types]}
+            "known_wastes": {},
+            "shared_targets": {},
+            "claims": {},
+            "robot_states": {},
+            "buffer_pos": None,
             "known_disposal_zone": None,
-            "history": []
+            "communication_enabled": False,
+            "z1_end": None,
+            "z2_end": None,
+            "height": None,
+            "frontier_dir": None,
         }
 
+    def inventory_copy(self):
+        return list(self.inventory)
+
     def update_knowledge(self, percepts):
-        """
-        Update the internal knowledge from percepts.
-        """
+        cells = percepts.get("cells", {})
         self.knowledge["position"] = self.pos
         self.knowledge["inventory"] = self.inventory_copy()
+        self.knowledge["visible_cells"] = cells
+        self.knowledge["shared_targets"] = percepts.get("shared_targets", {})
+        self.knowledge["claims"] = percepts.get("claims", {})
+        self.knowledge["robot_states"] = percepts.get("robot_states", {})
+        self.knowledge["buffer_pos"] = percepts.get("buffer_pos")
+        self.knowledge["communication_enabled"] = percepts.get("communication_enabled", False)
+        self.knowledge["z1_end"] = percepts.get("z1_end")
+        self.knowledge["z2_end"] = percepts.get("z2_end")
+        self.knowledge["height"] = percepts.get("height")
 
-        if self.robot_type == "green":
-            self.knowledge["allowed_zones"] = ["z1"]
-        elif self.robot_type == "yellow":
-            self.knowledge["allowed_zones"] = ["z1", "z2"]
-        elif self.robot_type == "red":
-            self.knowledge["allowed_zones"] = ["z1", "z2", "z3"]
+        # disposal zone known globally
+        self.knowledge["known_disposal_zone"] = percepts.get("disposal_pos")
 
-        self.knowledge["visible_cells"] = percepts
-
-        for pos, cell_info in percepts.items():
+        for pos, cell_info in cells.items():
             wastes = cell_info.get("wastes", [])
             if wastes:
                 self.knowledge["known_wastes"][pos] = list(wastes)
             elif pos in self.knowledge["known_wastes"]:
                 del self.knowledge["known_wastes"][pos]
 
-            if cell_info.get("disposal_zone", False):
-                self.knowledge["known_disposal_zone"] = pos
-
-        self.knowledge["history"].append({
-            "position": self.pos,
-            "inventory": self.inventory_copy(),
-            "percepts": percepts
-        })
-
-        if len(self.knowledge["history"]) > 50:
-            self.knowledge["history"] = self.knowledge["history"][-50:]
-
-    def inventory_copy(self):
-        return list(getattr(self, "inventory", []))
-
     def step_agent(self):
-        """
-        Exact form requested by the subject:
-        update(self.knowledge, percepts)
-        action = deliberate(self.knowledge)
-        percepts = self.model.do(self, action)
-        """
         percepts = self.model.get_percepts(self)
         self.update_knowledge(percepts)
-        action = self.deliberate(self.knowledge)
-        percepts = self.model.do(self, action)
+        action_bundle = self.deliberate(self.knowledge)
+        percepts = self.model.do(self, action_bundle)
         self.update_knowledge(percepts)
 
     @staticmethod
     def deliberate(knowledge):
-        """
-        Must be overridden.
-        Deliberate only uses its argument.
-        """
-        return {"type": "wait"}
+        return {"main": {"type": "wait"}, "reports": [], "claim": None}
 
+    @staticmethod
+    def _step_towards(position, target, visible, allowed_zones=None):
+        x, y = position
+        tx, ty = target
+
+        candidates = []
+        if tx > x:
+            candidates.append((x + 1, y))
+        elif tx < x:
+            candidates.append((x - 1, y))
+
+        if ty > y:
+            candidates.append((x, y + 1))
+        elif ty < y:
+            candidates.append((x, y - 1))
+
+        if not candidates:
+            return None
+
+        for p in candidates:
+            if p in visible:
+                if allowed_zones is None or visible[p]["zone"] in allowed_zones:
+                    return p
+
+        return None
+
+    @staticmethod
+    def _frontier_patrol_step(knowledge, frontier_x, allowed_zones):
+        position = knowledge["position"]
+        x, y = position
+        visible = knowledge["visible_cells"]
+        height = knowledge["height"]
+
+        robot_num = int("".join(ch for ch in knowledge["self_id"] if ch.isdigit()) or 0)
+
+        # 1) First go to the frontier column
+        if x < frontier_x:
+            next_pos = (x + 1, y)
+            if next_pos in visible and visible[next_pos]["zone"] in allowed_zones:
+                return next_pos
+
+        if x > frontier_x:
+            next_pos = (x - 1, y)
+            if next_pos in visible and visible[next_pos]["zone"] in allowed_zones:
+                return next_pos
+
+        # 2) Once on the frontier, keep a persistent vertical direction
+        direction = knowledge.get("frontier_dir")
+        if direction not in (-1, 1):
+            # even ids start downward, odd ids start upward
+            direction = 1 if robot_num % 2 == 0 else -1
+            knowledge["frontier_dir"] = direction
+
+        # Bounce at borders
+        if y == 0:
+            direction = 1
+            knowledge["frontier_dir"] = direction
+        elif y == height - 1:
+            direction = -1
+            knowledge["frontier_dir"] = direction
+
+        next_pos = (x, y + direction)
+        if next_pos in visible and visible[next_pos]["zone"] in allowed_zones:
+            return next_pos
+
+        # If blocked vertically, reverse direction and try once
+        direction = -direction
+        knowledge["frontier_dir"] = direction
+
+        next_pos = (x, y + direction)
+        if next_pos in visible and visible[next_pos]["zone"] in allowed_zones:
+            return next_pos
+
+        # 3) Small lateral fallback, but stay near frontier
+        lateral_candidates = [
+            (frontier_x - 1, y),
+            (frontier_x + 1, y),
+        ]
+
+        for p in lateral_candidates:
+            if p in visible and visible[p]["zone"] in allowed_zones:
+                return p
+
+        return None
+
+    @staticmethod
+    def _green_rect_patrol_step(knowledge):
+        position = knowledge["position"]
+        x, y = position
+        visible = knowledge["visible_cells"]
+        z1_end = knowledge["z1_end"]
+        height = knowledge["height"]
+
+        robot_num = int("".join(ch for ch in knowledge["self_id"] if ch.isdigit()) or 0)
+
+        # Divide z1 rows into 3 patrol bands
+        # Example with height=8:
+        # G0 -> rows 0..2
+        # G1 -> rows 3..5
+        # G2 -> rows 6..7
+        band_size = max(1, height // 3)
+        y_min = min(robot_num * band_size, height - 1)
+
+        if robot_num == 2:
+            y_max = height - 1
+        else:
+            y_max = min((robot_num + 1) * band_size - 1, height - 1)
+
+        x_min = 0
+        x_max = z1_end
+
+        # Sense:
+        # G0 clockwise
+        # G1 counter-clockwise
+        # G2 clockwise
+        clockwise = (robot_num % 2 == 0)
+
+        candidates = []
+
+        if clockwise:
+            # top edge -> move right
+            if y == y_min and x < x_max:
+                candidates.append((x + 1, y))
+            # right edge -> move down
+            elif x == x_max and y < y_max:
+                candidates.append((x, y + 1))
+            # bottom edge -> move left
+            elif y == y_max and x > x_min:
+                candidates.append((x - 1, y))
+            # left edge -> move up
+            elif x == x_min and y > y_min:
+                candidates.append((x, y - 1))
+        else:
+            # left edge -> move down
+            if x == x_min and y < y_max:
+                candidates.append((x, y + 1))
+            # bottom edge -> move right
+            elif y == y_max and x < x_max:
+                candidates.append((x + 1, y))
+            # right edge -> move up
+            elif x == x_max and y > y_min:
+                candidates.append((x, y - 1))
+            # top edge -> move left
+            elif y == y_min and x > x_min:
+                candidates.append((x - 1, y))
+
+        # If not exactly on the patrol rectangle, move toward it
+        if not candidates:
+            target_x = min(max(x, x_min), x_max)
+            target_y = min(max(y, y_min), y_max)
+
+            if y < target_y:
+                candidates.append((x, y + 1))
+            elif y > target_y:
+                candidates.append((x, y - 1))
+
+            if x < target_x:
+                candidates.append((x + 1, y))
+            elif x > target_x:
+                candidates.append((x - 1, y))
+
+        # Final fallback inside z1
+        candidates.extend([
+            (x + 1, y),
+            (x - 1, y),
+            (x, y + 1),
+            (x, y - 1),
+        ])
+
+        for p in candidates:
+            if p in visible and visible[p]["zone"] == "z1":
+                return p
+
+        return None
+
+    @staticmethod
+    def _visible_reports(position, visible, waste_type, priority=1):
+        reports = []
+        for pos, cell in visible.items():
+            if waste_type in cell.get("wastes", []):
+                reports.append({
+                    "waste_type": waste_type,
+                    "position": pos,
+                    "distance": manhattan(position, pos),
+                    "priority": priority,
+                })
+        return reports
+
+    @staticmethod
+    def _best_unclaimed_target(self_id, position, visible, known_wastes, shared_targets, claims, wanted_type):
+        candidates = []
+
+        for pos, wastes in known_wastes.items():
+            if wanted_type in wastes:
+                candidates.append(pos)
+
+        for pos in shared_targets.keys():
+            if pos not in candidates:
+                candidates.append(pos)
+
+        filtered = []
+        for pos in candidates:
+            claim = claims.get(pos)
+            if claim is None or claim["robot_id"] == self_id:
+                filtered.append(pos)
+
+        if not filtered:
+            return None
+
+        def target_score(p):
+            shared_info = shared_targets.get(p, {})
+            priority = shared_info.get("priority", 1)
+            distance = manhattan(position, p)
+            return distance - (2 * priority)
+
+        return min(filtered, key=target_score)
+
+    @staticmethod
+    def _robot_numeric_id(robot_id):
+        return int("".join(ch for ch in robot_id if ch.isdigit()) or 0)
+
+    @staticmethod
+    def _has_known_target_of_type(known_wastes, shared_targets, wanted_type):
+        for wastes in known_wastes.values():
+            if wanted_type in wastes:
+                return True
+
+        for _pos in shared_targets.keys():
+            return True
+
+        return False
+
+    @staticmethod
+    def _cooperative_drop_decision(knowledge, item_type, allowed_zones):
+        """
+        Pairwise cooperative exchange for isolated items.
+
+        Rule:
+        - communication must be enabled
+        - robot must hold exactly one isolated item
+        - no known target of same type on map/shared map
+        - robots with one isolated item are sorted by numeric id
+        - each robot gives to the next higher-id robot
+          examples: G1->G2, G2->G3, G3->G4
+        - the donor drops on buffer, the receiver goes to buffer and picks
+        """
+        if not knowledge["communication_enabled"]:
+            return None
+
+        position = knowledge["position"]
+        inventory = knowledge["inventory"]
+        visible = knowledge["visible_cells"]
+        known_wastes = knowledge["known_wastes"]
+        shared_targets = knowledge["shared_targets"]
+        robot_states = knowledge["robot_states"]
+        buffer_pos = knowledge["buffer_pos"]
+        self_id = knowledge["self_id"]
+
+        if buffer_pos is None:
+            return None
+
+        if inventory.count(item_type) != 1:
+            return None
+
+        # Avoid cooperation if another compatible waste is already known
+        if BaseRobotAgent._has_known_target_of_type(known_wastes, shared_targets, item_type):
+            return None
+
+        # Same-type robots carrying exactly one isolated item
+        candidates = []
+        for robot_id, state in robot_states.items():
+            if state.get("inventory_count", 0) == 1:
+                candidates.append(robot_id)
+
+        if self_id not in candidates:
+            candidates.append(self_id)
+
+        candidates = sorted(set(candidates), key=BaseRobotAgent._robot_numeric_id)
+
+        if len(candidates) < 2:
+            return None
+
+        current_wastes = visible.get(position, {}).get("wastes", [])
+
+        my_index = candidates.index(self_id)
+
+        # Build disjoint pairs: (0,1), (2,3), (4,5), ...
+        pair_start = (my_index // 2) * 2
+
+        if pair_start + 1 >= len(candidates):
+            return None
+
+        donor_id = candidates[pair_start]
+        receiver_id = candidates[pair_start + 1]
+
+        if self_id == donor_id:
+            if position == buffer_pos:
+                if item_type not in current_wastes:
+                    return {
+                        "main": {"type": "drop"},
+                        "reports": [],
+                        "status_reports": [],
+                        "claim": None,
+                    }
+                return {
+                    "main": {"type": "wait"},
+                    "reports": [],
+                    "status_reports": [],
+                    "claim": None,
+                }
+
+            next_pos = BaseRobotAgent._step_towards(position, buffer_pos, visible, allowed_zones)
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": [],
+                    "status_reports": [],
+                    "claim": None,
+                }
+
+            return {
+                "main": {"type": "wait"},
+                "reports": [],
+                "status_reports": [],
+                "claim": None,
+            }
+
+        if self_id == receiver_id:
+            if position == buffer_pos and item_type in current_wastes:
+                return {
+                    "main": {"type": "pick"},
+                    "reports": [],
+                    "status_reports": [],
+                    "claim": None,
+                }
+
+            next_pos = BaseRobotAgent._step_towards(position, buffer_pos, visible, allowed_zones)
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": [],
+                    "status_reports": [],
+                    "claim": {"waste_type": item_type, "position": buffer_pos},
+                }
+
+            return {
+                "main": {"type": "wait"},
+                "reports": [],
+                "status_reports": [],
+                "claim": {"waste_type": item_type, "position": buffer_pos},
+            }
+
+        return None
 
 class greenAgent(BaseRobotAgent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.robot_type = "green"
-        self.inventory = []
 
     @staticmethod
     def deliberate(knowledge):
-        """
-        Green robot:
-        - move in z1 only
-        - pick 2 green wastes
-        - transform into 1 yellow waste
-        - if holding yellow waste, move east and drop it
-        """
         position = knowledge["position"]
         x, y = position
         inventory = knowledge["inventory"]
         visible = knowledge["visible_cells"]
         known_wastes = knowledge["known_wastes"]
+        z1_end = knowledge["z1_end"]
+
+        reports = []
+        status_reports = []
+
+        if knowledge["communication_enabled"]:
+            reports.extend(BaseRobotAgent._visible_reports(position, visible, "green", priority=1))
+            reports.extend(BaseRobotAgent._visible_reports(position, visible, "yellow", priority=2))
+            status_reports.append({
+                "robot_type": "green",
+                "robot_id": knowledge["self_id"],
+                "position": position,
+                "inventory_count": inventory.count("green"),
+            })
 
         current_cell = visible.get(position, {})
         current_wastes = current_cell.get("wastes", [])
 
-        # If carrying yellow, move east if possible, otherwise drop
         if "yellow" in inventory:
-            east_pos = (x + 1, y)
-            if east_pos in visible and visible[east_pos]["zone"] == "z1":
-                return {"type": "move", "to": east_pos}
-            return {"type": "drop"}
-
-        # If enough green wastes in inventory -> transform
-        if inventory.count("green") >= 2:
-            return {"type": "transform"}
-
-        # If green waste on current cell -> pick
-        if "green" in current_wastes:
-            return {"type": "pick"}
-
-        # Search nearest known green waste
-        candidates = []
-        for pos, wastes in known_wastes.items():
-            if "green" in wastes:
-                candidates.append(pos)
-
-        if candidates:
-            target = min(
-                candidates,
-                key=lambda p: abs(p[0] - x) + abs(p[1] - y)
-            )
-            tx, ty = target
-            if tx > x:
+            target_drop_x = z1_end
+            if x < target_drop_x:
                 next_pos = (x + 1, y)
-            elif tx < x:
-                next_pos = (x - 1, y)
-            elif ty > y:
-                next_pos = (x, y + 1)
-            elif ty < y:
-                next_pos = (x, y - 1)
-            else:
-                next_pos = position
+                if next_pos in visible and visible[next_pos]["zone"] == "z1":
+                    return {
+                        "main": {"type": "move", "to": next_pos},
+                        "reports": reports,
+                        "status_reports": status_reports,
+                        "claim": None,
+                    }
+            return {
+                "main": {"type": "drop"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
-            if next_pos in visible and visible[next_pos]["zone"] == "z1":
-                return {"type": "move", "to": next_pos}
+        if inventory.count("green") >= 2:
+            return {
+                "main": {"type": "transform"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
-        # Random legal move in z1
-        neighbors = []
-        for pos, info in visible.items():
-            if pos != position and info["zone"] == "z1":
-                neighbors.append(pos)
+        if "green" in current_wastes:
+            return {
+                "main": {"type": "pick"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
-        if neighbors:
-            return {"type": "move", "to": random.choice(neighbors)}
+        coop_action = BaseRobotAgent._cooperative_drop_decision(
+            knowledge=knowledge,
+            item_type="green",
+            allowed_zones=["z1"],
+        )
+        if coop_action is not None:
+            coop_action["reports"] = reports
+            coop_action["status_reports"] = status_reports
+            return coop_action
 
-        return {"type": "wait"}
+        target = BaseRobotAgent._best_unclaimed_target(
+            self_id=knowledge["self_id"],
+            position=position,
+            visible=visible,
+            known_wastes=known_wastes,
+            shared_targets=knowledge["shared_targets"],
+            claims=knowledge["claims"],
+            wanted_type="green",
+        )
+
+        if target is not None:
+            next_pos = BaseRobotAgent._step_towards(position, target, visible, ["z1"])
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": {"waste_type": "green", "position": target},
+                }
+
+        next_pos = BaseRobotAgent._green_rect_patrol_step(knowledge)
+
+        if next_pos is not None:
+            return {
+                "main": {"type": "move", "to": next_pos},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
+
+        return {
+            "main": {"type": "wait"},
+            "reports": reports,
+            "status_reports": status_reports,
+            "claim": None,
+        }
 
 
 class yellowAgent(BaseRobotAgent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.robot_type = "yellow"
-        self.inventory = []
 
     @staticmethod
     def deliberate(knowledge):
-        """
-        Yellow robot:
-        - move in z1 and z2
-        - pick 2 yellow wastes
-        - transform into 1 red waste
-        - if holding red waste, move east and drop it
-        """
         position = knowledge["position"]
         x, y = position
         inventory = knowledge["inventory"]
         visible = knowledge["visible_cells"]
         known_wastes = knowledge["known_wastes"]
+        shared_targets = knowledge["shared_targets"]
+        claims = knowledge["claims"]
+        z2_end = knowledge["z2_end"]
+        self_id = knowledge["self_id"]
+
+        reports = []
+        status_reports = []
+
+        if knowledge["communication_enabled"]:
+            reports.extend(BaseRobotAgent._visible_reports(position, visible, "yellow", priority=1))
+            reports.extend(BaseRobotAgent._visible_reports(position, visible, "red", priority=3))
+            status_reports.append({
+                "robot_type": "yellow",
+                "robot_id": knowledge["self_id"],
+                "position": position,
+                "inventory_count": inventory.count("yellow"),
+            })
 
         current_cell = visible.get(position, {})
         current_wastes = current_cell.get("wastes", [])
 
-        # If carrying red, move east if possible, otherwise drop
         if "red" in inventory:
-            east_pos = (x + 1, y)
-            if east_pos in visible and visible[east_pos]["zone"] in ["z1", "z2"]:
-                return {"type": "move", "to": east_pos}
-            return {"type": "drop"}
-
-        # Transform 2 yellow -> 1 red
-        if inventory.count("yellow") >= 2:
-            return {"type": "transform"}
-
-        # Pick if current cell contains yellow waste
-        if "yellow" in current_wastes:
-            return {"type": "pick"}
-
-        # Search nearest known yellow waste
-        candidates = []
-        for pos, wastes in known_wastes.items():
-            if "yellow" in wastes:
-                candidates.append(pos)
-
-        if candidates:
-            target = min(
-                candidates,
-                key=lambda p: abs(p[0] - x) + abs(p[1] - y)
-            )
-            tx, ty = target
-            if tx > x:
+            target_drop_x = z2_end
+            if x < target_drop_x:
                 next_pos = (x + 1, y)
-            elif tx < x:
-                next_pos = (x - 1, y)
-            elif ty > y:
-                next_pos = (x, y + 1)
-            elif ty < y:
-                next_pos = (x, y - 1)
-            else:
-                next_pos = position
+                if next_pos in visible and visible[next_pos]["zone"] in ["z1", "z2"]:
+                    return {
+                        "main": {"type": "move", "to": next_pos},
+                        "reports": reports,
+                        "status_reports": status_reports,
+                        "claim": None,
+                    }
+            return {
+                "main": {"type": "drop"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
-            if next_pos in visible and visible[next_pos]["zone"] in ["z1", "z2"]:
-                return {"type": "move", "to": next_pos}
+        if inventory.count("yellow") >= 2:
+            return {
+                "main": {"type": "transform"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
-        # Random legal move in z1/z2
-        neighbors = []
-        for pos, info in visible.items():
-            if pos != position and info["zone"] in ["z1", "z2"]:
-                neighbors.append(pos)
+        if "yellow" in current_wastes:
+            return {
+                "main": {"type": "pick"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
-        if neighbors:
-            return {"type": "move", "to": random.choice(neighbors)}
+        coop_action = BaseRobotAgent._cooperative_drop_decision(
+            knowledge=knowledge,
+            item_type="yellow",
+            allowed_zones=["z1", "z2"],
+        )
+        if coop_action is not None:
+            coop_action["reports"] = reports
+            coop_action["status_reports"] = status_reports
+            return coop_action
 
-        return {"type": "wait"}
+        target = BaseRobotAgent._best_unclaimed_target(
+            self_id=self_id,
+            position=position,
+            visible=visible,
+            known_wastes=known_wastes,
+            shared_targets=shared_targets,
+            claims=claims,
+            wanted_type="yellow",
+        )
+
+        if target is not None:
+            next_pos = BaseRobotAgent._step_towards(position, target, visible, ["z1", "z2"])
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": {"waste_type": "yellow", "position": target},
+                }
+
+        next_pos = BaseRobotAgent._frontier_patrol_step(
+            knowledge=knowledge,
+            frontier_x=knowledge["z1_end"],
+            allowed_zones=["z1", "z2"],
+        )
+
+        if next_pos is not None:
+            return {
+                "main": {"type": "move", "to": next_pos},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
+
+        return {
+            "main": {"type": "wait"},
+            "reports": reports,
+            "status_reports": status_reports,
+            "claim": None,
+        }
 
 
 class redAgent(BaseRobotAgent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.robot_type = "red"
-        self.inventory = []
 
     @staticmethod
     def deliberate(knowledge):
-        """
-        Red robot:
-        - move in z1, z2, z3
-        - pick 1 red waste
-        - transport it to disposal zone
-        - put it away there
-        """
         position = knowledge["position"]
         x, y = position
         inventory = knowledge["inventory"]
         visible = knowledge["visible_cells"]
         known_wastes = knowledge["known_wastes"]
+        shared_targets = knowledge["shared_targets"]
+        claims = knowledge["claims"]
         disposal_pos = knowledge["known_disposal_zone"]
+        self_id = knowledge["self_id"]
 
         current_cell = visible.get(position, {})
         current_wastes = current_cell.get("wastes", [])
 
-        # If carrying red waste and on disposal zone -> drop
         if "red" in inventory and current_cell.get("disposal_zone", False):
-            return {"type": "drop"}
+            return {"main": {"type": "drop"}, "reports": [], "claim": None}
 
-        # If carrying red waste -> move toward disposal zone
         if "red" in inventory and disposal_pos is not None:
-            dx, dy = disposal_pos
-            if dx > x:
-                return {"type": "move", "to": (x + 1, y)}
-            if dx < x:
-                return {"type": "move", "to": (x - 1, y)}
-            if dy > y:
-                return {"type": "move", "to": (x, y + 1)}
-            if dy < y:
-                return {"type": "move", "to": (x, y - 1)}
-            return {"type": "wait"}
+            if position == disposal_pos:
+                return {"main": {"type": "drop"}, "reports": [], "claim": None}
 
-        # Pick if current cell contains red waste
+            next_pos = BaseRobotAgent._step_towards(position, disposal_pos, visible, ["z1", "z2", "z3"])
+            if next_pos is not None:
+                return {"main": {"type": "move", "to": next_pos}, "reports": [], "claim": None}
+
+            return {"main": {"type": "wait"}, "reports": [], "claim": None}
+
         if "red" in current_wastes:
-            return {"type": "pick"}
+            return {"main": {"type": "pick"}, "reports": [], "claim": None}
 
-        # Search nearest known red waste
-        candidates = []
-        for pos, wastes in known_wastes.items():
-            if "red" in wastes:
-                candidates.append(pos)
+        target = BaseRobotAgent._best_unclaimed_target(
+            self_id=self_id,
+            position=position,
+            visible=visible,
+            known_wastes=known_wastes,
+            shared_targets=shared_targets,
+            claims=claims,
+            wanted_type="red",
+        )
 
-        if candidates:
-            target = min(
-                candidates,
-                key=lambda p: abs(p[0] - x) + abs(p[1] - y)
-            )
-            tx, ty = target
-            if tx > x:
-                return {"type": "move", "to": (x + 1, y)}
-            if tx < x:
-                return {"type": "move", "to": (x - 1, y)}
-            if ty > y:
-                return {"type": "move", "to": (x, y + 1)}
-            if ty < y:
-                return {"type": "move", "to": (x, y - 1)}
+        if target is not None:
+            next_pos = BaseRobotAgent._step_towards(position, target, visible, ["z1", "z2", "z3"])
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": [],
+                    "claim": {"waste_type": "red", "position": target},
+                }
 
-        # Random move anywhere visible
-        neighbors = []
-        for pos in visible:
-            if pos != position:
-                neighbors.append(pos)
+        # phase 1 / no known target:
+        # patrol along the z2/z3 frontier to eventually find red wastes
+        next_pos = BaseRobotAgent._frontier_patrol_step(
+            knowledge=knowledge,
+            frontier_x=knowledge["z2_end"],
+            allowed_zones=["z1", "z2", "z3"],
+        )
 
-        if neighbors:
-            return {"type": "move", "to": random.choice(neighbors)}
+        if next_pos is not None:
+            return {
+                "main": {"type": "move", "to": next_pos},
+                "reports": [],
+                "claim": None,
+            }
 
-        return {"type": "wait"}
+        return {"main": {"type": "wait"}, "reports": [], "claim": None}

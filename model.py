@@ -8,54 +8,91 @@
 import random
 
 from agents import greenAgent, yellowAgent, redAgent
-from objects import RadioactivityAgent, WasteAgent
+from objects import RadioactivityAgent, WasteAgent, WasteDisposalZoneAgent
 
 
 class RobotMission:
     def __init__(
-        self,
-        width=18,
-        height=8,
-        n_green_robots=3,
-        n_yellow_robots=2,
-        n_red_robots=2,
-        n_initial_green_wastes=24,
-        seed=42
+            self,
+            width=18,
+            height=8,
+            n_green_robots=3,
+            n_yellow_robots=2,
+            n_red_robots=2,
+            n_initial_green_wastes=None,
+            seed=32,
+            communication_enabled=True,
+            max_steps=2000,
     ):
         random.seed(seed)
 
         self.width = width
         self.height = height
         self.step_count = 0
+        self.model_id = random.randint(100000, 999999)
+        self.communication_enabled = communication_enabled
+        self.max_steps = max_steps
 
-        # zone boundaries
+        if n_initial_green_wastes is None:
+            z1_width = width // 3
+            z1_capacity = z1_width * height
+            n_initial_green_wastes = random.randint(12, max(12, z1_capacity // 2))
+
         self.z1_end = width // 3 - 1
         self.z2_end = (2 * width) // 3 - 1
 
-        # grid data
         self.radioactivity_grid = {}
-        self.waste_grid = {}       # {(x, y): [WasteAgent, ...]}
-        self.robot_grid = {}       # {(x, y): [robot, ...]}
+        self.waste_grid = {}
+        self.robot_grid = {}
 
         self.agents = []
 
-        # disposal zone: as far east as possible
         self.disposal_pos = (self.width - 1, random.randrange(self.height))
+        self.disposal_agent = WasteDisposalZoneAgent()
 
         self.stored_red_waste = 0
+        self.message_count = 0
+        self.finished_at = None
+
+        # important for your current setup:
+        # 4 green -> 1 stored red
+        self.initial_green_wastes = n_initial_green_wastes
+        self.expected_stored_red = self.initial_green_wastes // 4
+
+        ## shared map by waste type
+        self.shared_map = {
+            "green": {},    # pos -> {"last_seen": step, "reporter": "...", "distance": ..., "priority": ...}
+            "yellow": {},
+            "red": {},
+        }
+
+        self.claims = {
+            "green": {},  # pos -> {"robot_id": "...", "step": ...}
+            "yellow": {},
+            "red": {},
+        }
+
+        self.shared_robot_state = {
+            "green": {},  # robot_id -> {"position": (...), "inventory_count": int, "last_seen": step}
+            "yellow": {},
+            "red": {},
+        }
+
+        self.report_ttl = 20
+        self.claim_ttl = 8
 
         self.history = {
             "steps": [],
             "green": [],
             "yellow": [],
             "red": [],
-            "stored_red": []
+            "stored_red": [],
+            "messages": [],
         }
 
         self._create_environment()
         self._create_initial_wastes(n_initial_green_wastes)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
-
         self.record_history()
 
     # ---------------------------------------------------------
@@ -113,6 +150,110 @@ class RobotMission:
             self._place_robot(a, random.choice(all_cells))
 
     # ---------------------------------------------------------
+    # Shared map / claims
+    # ---------------------------------------------------------
+
+    def _cleanup_shared_state(self):
+        for waste_type in ["green", "yellow", "red"]:
+            # remove outdated reports
+            for pos in list(self.shared_map[waste_type].keys()):
+                report = self.shared_map[waste_type][pos]
+                if self.step_count - report["last_seen"] > self.report_ttl:
+                    del self.shared_map[waste_type][pos]
+
+            # remove outdated claims
+            for pos in list(self.claims[waste_type].keys()):
+                claim = self.claims[waste_type][pos]
+                if self.step_count - claim["step"] > self.claim_ttl:
+                    del self.claims[waste_type][pos]
+
+            # remove outdated robot status
+            for robot_id in list(self.shared_robot_state[waste_type].keys()):
+                state = self.shared_robot_state[waste_type][robot_id]
+                if self.step_count - state["last_seen"] > self.report_ttl:
+                    del self.shared_robot_state[waste_type][robot_id]
+
+            # remove stale entries if waste no longer exists there
+            for pos in list(self.shared_map[waste_type].keys()):
+                actual = [w.waste_type for w in self.waste_grid.get(pos, [])]
+                if waste_type not in actual:
+                    del self.shared_map[waste_type][pos]
+                    if pos in self.claims[waste_type]:
+                        del self.claims[waste_type][pos]
+
+    def _publish_report(self, reporter_id, waste_type, position, report=None):
+        if not self.communication_enabled:
+            return
+        if waste_type not in ["green", "yellow", "red"]:
+            return
+
+        if report is None:
+            report = {}
+
+        position = tuple(position)
+        existing = self.shared_map[waste_type].get(position)
+
+        new_report = {
+            "last_seen": self.step_count,
+            "reporter": reporter_id,
+            "distance": report.get("distance", 0),
+            "priority": report.get("priority", 1),
+        }
+
+        if existing != new_report:
+            self.message_count += 1
+
+        self.shared_map[waste_type][position] = new_report
+
+    def _claim_target(self, robot_id, waste_type, position):
+        if waste_type not in ["green", "yellow", "red"]:
+            return
+        position = tuple(position)
+        self.claims[waste_type][position] = {
+            "robot_id": robot_id,
+            "step": self.step_count,
+        }
+
+    def _release_claim_if_any(self, robot_id, waste_type):
+        if waste_type not in ["green", "yellow", "red"]:
+            return
+        for pos in list(self.claims[waste_type].keys()):
+            if self.claims[waste_type][pos]["robot_id"] == robot_id:
+                del self.claims[waste_type][pos]
+
+    def _buffer_pos_for(self, robot_type):
+        if robot_type == "green":
+            return (self.z1_end, self.height // 2)
+        if robot_type == "yellow":
+            return (self.z2_end, self.height // 2)
+        return None
+
+    def _publish_robot_status(self, robot_id, robot_type, position, inventory_count):
+        if not self.communication_enabled:
+            return
+        if robot_type not in ["green", "yellow", "red"]:
+            return
+
+        new_state = {
+            "position": tuple(position),
+            "inventory_count": inventory_count,
+            "last_seen": self.step_count,
+        }
+
+        existing = self.shared_robot_state[robot_type].get(robot_id)
+        if existing != new_state:
+            self.message_count += 1
+
+        self.shared_robot_state[robot_type][robot_id] = new_state
+
+    def _can_any_robot_transform(self, robot_type):
+        if robot_type == "green":
+            return any(agent.inventory.count("green") >= 2 for agent in self.agents if isinstance(agent, greenAgent))
+        if robot_type == "yellow":
+            return any(agent.inventory.count("yellow") >= 2 for agent in self.agents if isinstance(agent, yellowAgent))
+        return False
+
+    # ---------------------------------------------------------
     # Percepts
     # ---------------------------------------------------------
 
@@ -134,10 +275,7 @@ class RobotMission:
         return positions
 
     def get_percepts(self, agent):
-        """
-        Must return a dictionary describing adjacent tiles and their content.
-        """
-        percepts = {}
+        cells = {}
         positions = self._neighbors_plus_current(agent.pos)
 
         for pos in positions:
@@ -145,42 +283,103 @@ class RobotMission:
             wastes = [w.waste_type for w in self.waste_grid.get(pos, [])]
             robots = [r.unique_id for r in self.robot_grid.get(pos, []) if r is not agent]
 
-            percepts[pos] = {
+            cells[pos] = {
                 "zone": radio.zone,
                 "radioactivity": radio.level,
                 "wastes": wastes,
                 "robots": robots,
-                "disposal_zone": (pos == self.disposal_pos)
+                "disposal_zone": (pos == self.disposal_pos),
             }
 
-        return percepts
+        if agent.robot_type == "green":
+            shared = dict(self.shared_map["green"])
+            claims = dict(self.claims["green"])
+            robot_states = dict(self.shared_robot_state["green"])
+        elif agent.robot_type == "yellow":
+            shared = dict(self.shared_map["yellow"])
+            claims = dict(self.claims["yellow"])
+            robot_states = dict(self.shared_robot_state["yellow"])
+        elif agent.robot_type == "red":
+            shared = dict(self.shared_map["red"])
+            claims = dict(self.claims["red"])
+            robot_states = dict(self.shared_robot_state["red"])
+        else:
+            shared = {}
+            claims = {}
+            robot_states = {}
+
+        return {
+            "cells": cells,
+            "shared_targets": shared,
+            "claims": claims,
+            "robot_states": robot_states,
+            "buffer_pos": self._buffer_pos_for(agent.robot_type),
+            "communication_enabled": self.communication_enabled,
+            "z1_end": self.z1_end,
+            "z2_end": self.z2_end,
+            "disposal_pos": self.disposal_pos,
+            "height": self.height,
+        }
 
     # ---------------------------------------------------------
     # Action execution
     # ---------------------------------------------------------
 
-    def do(self, agent, action):
+    def do(self, agent, action_bundle):
         """
-        Check whether the action is feasible, then apply it.
-        Return percepts as a dictionary.
+        action_bundle format:
+        {
+            "main": {...},
+            "reports": [{"waste_type": "...", "position": (...)}, ...],
+            "claim": {"waste_type": "...", "position": (...)} | None
+        }
         """
-        action_type = action.get("type", "wait")
+        if action_bundle is None:
+            action_bundle = {}
+
+        reports = action_bundle.get("reports", [])
+        status_reports = action_bundle.get("status_reports", [])
+        claim = action_bundle.get("claim")
+        main_action = action_bundle.get("main", {"type": "wait"})
+
+        # communication does not consume the turn anymore
+        for report in reports:
+            self._publish_report(
+                reporter_id=agent.unique_id,
+                waste_type=report.get("waste_type"),
+                position=report.get("position"),
+                report=report,
+            )
+
+        for status in status_reports:
+            self._publish_robot_status(
+                robot_id=status.get("robot_id", agent.unique_id),
+                robot_type=status.get("robot_type", agent.robot_type),
+                position=status.get("position", agent.pos),
+                inventory_count=status.get("inventory_count", 0),
+            )
+
+        if claim is not None:
+            self._claim_target(
+                robot_id=agent.unique_id,
+                waste_type=claim.get("waste_type"),
+                position=claim.get("position"),
+            )
+
+        action_type = main_action.get("type", "wait")
 
         if action_type == "move":
-            self._do_move(agent, action)
-
+            self._do_move(agent, main_action)
         elif action_type == "pick":
             self._do_pick(agent)
-
         elif action_type == "transform":
             self._do_transform(agent)
-
         elif action_type == "drop":
             self._do_drop(agent)
-
         elif action_type == "wait":
             pass
 
+        self._cleanup_shared_state()
         return self.get_percepts(agent)
 
     def _allowed_zones_for(self, agent):
@@ -204,20 +403,16 @@ class RobotMission:
         target = action["to"]
         tx, ty = target
 
-        # check bounds
         if not (0 <= tx < self.width and 0 <= ty < self.height):
             return
 
-        # check adjacency
         if not self._is_adjacent(agent.pos, target):
             return
 
-        # check zone access
         target_zone = self.radioactivity_grid[target].zone
         if target_zone not in self._allowed_zones_for(agent):
             return
 
-        # perform move
         old_pos = agent.pos
         if old_pos in self.robot_grid and agent in self.robot_grid[old_pos]:
             self.robot_grid[old_pos].remove(agent)
@@ -246,6 +441,13 @@ class RobotMission:
                 del wastes[i]
                 if not wastes:
                     del self.waste_grid[pos]
+
+                # if target was shared/claimed, clear it
+                if needed_type in ["green", "yellow", "red"]:
+                    if pos in self.shared_map[needed_type]:
+                        del self.shared_map[needed_type][pos]
+                    if pos in self.claims[needed_type]:
+                        del self.claims[needed_type][pos]
                 return
 
     def _do_transform(self, agent):
@@ -260,6 +462,7 @@ class RobotMission:
                         new_inventory.append(item)
                 new_inventory.append("yellow")
                 agent.inventory = new_inventory
+                self._release_claim_if_any(agent.unique_id, "green")
 
         elif isinstance(agent, yellowAgent):
             if agent.inventory.count("yellow") >= 2:
@@ -272,33 +475,79 @@ class RobotMission:
                         new_inventory.append(item)
                 new_inventory.append("red")
                 agent.inventory = new_inventory
+                self._release_claim_if_any(agent.unique_id, "yellow")
 
     def _do_drop(self, agent):
         pos = agent.pos
 
-        # final storage by red robot on disposal zone
         if isinstance(agent, redAgent) and pos == self.disposal_pos and "red" in agent.inventory:
             agent.inventory.remove("red")
             self.stored_red_waste += 1
+            print(
+                f"[STORE] model_id={self.model_id} step={self.step_count} "
+                f"robot={agent.unique_id} stored_red_waste={self.stored_red_waste}"
+            )
+            self._release_claim_if_any(agent.unique_id, "red")
             return
 
-        # regular drop on cell
         if not agent.inventory:
             return
 
         item = agent.inventory.pop(0)
         self.waste_grid.setdefault(pos, []).append(WasteAgent(item))
 
+        # publish useful intermediate waste automatically only when relevant
+        if item == "green" and self.communication_enabled:
+            if self.radioactivity_grid[pos].zone == "z1":
+                self._publish_report(
+                    agent.unique_id,
+                    "green",
+                    pos,
+                    report={"distance": 0, "priority": 1},
+                )
+
+        elif item == "yellow" and self.communication_enabled:
+            if self.radioactivity_grid[pos].zone in ["z1", "z2"]:
+                self._publish_report(
+                    agent.unique_id,
+                    "yellow",
+                    pos,
+                    report={"distance": 0, "priority": 2},
+                )
+
+        elif item == "red" and self.communication_enabled:
+            if pos != self.disposal_pos:
+                self._publish_report(
+                    agent.unique_id,
+                    "red",
+                    pos,
+                    report={"distance": 0, "priority": 3},
+                )
+
     # ---------------------------------------------------------
     # Simulation loop
     # ---------------------------------------------------------
 
     def step(self):
+        if self.finished_at is not None:
+            return
+
+        if self.step_count >= self.max_steps:
+            self.finished_at = self.step_count
+            return
+
         random.shuffle(self.agents)
         for agent in self.agents:
             agent.step_agent()
+
         self.step_count += 1
+        self._cleanup_shared_state()
         self.record_history()
+
+        if self.is_finished() and self.finished_at is None:
+            self.finished_at = self.step_count
+        elif self.step_count >= self.max_steps and self.finished_at is None:
+            self.finished_at = self.step_count
 
     # ---------------------------------------------------------
     # Statistics / end condition
@@ -306,26 +555,67 @@ class RobotMission:
 
     def count_wastes_on_grid(self):
         counts = {"green": 0, "yellow": 0, "red": 0}
-        for wastes in self.waste_grid.values():
-            for w in wastes:
-                counts[w.waste_type] += 1
+        for waste_list in self.waste_grid.values():
+            for waste in waste_list:
+                counts[waste.waste_type] += 1
         return counts
 
     def record_history(self):
         counts = self.count_wastes_on_grid()
+
+        if self.history["stored_red"]:
+            previous_value = self.history["stored_red"][-1]
+            if self.stored_red_waste < previous_value:
+                print(
+                    f"[BUG] model_id={self.model_id} stored_red_waste decreased: "
+                    f"{previous_value} -> {self.stored_red_waste}"
+                )
+
         self.history["steps"].append(self.step_count)
         self.history["green"].append(counts["green"])
         self.history["yellow"].append(counts["yellow"])
         self.history["red"].append(counts["red"])
         self.history["stored_red"].append(self.stored_red_waste)
+        self.history["messages"].append(self.message_count)
 
     def is_finished(self):
-        counts = self.count_wastes_on_grid()
-        hands_empty = all(len(agent.inventory) == 0 for agent in self.agents)
+        if self.step_count >= self.max_steps:
+            return True
 
-        return (
-            counts["green"] == 0 and
-            counts["yellow"] == 0 and
-            counts["red"] == 0 and
-            hands_empty
-        )
+        # Success criterion: stop as soon as enough red waste is stored
+        if self.stored_red_waste >= self.expected_stored_red:
+            return True
+
+        counts = self.count_wastes_on_grid()
+
+        green_in_hands = sum(agent.inventory.count("green") for agent in self.agents)
+        yellow_in_hands = sum(agent.inventory.count("yellow") for agent in self.agents)
+        red_in_hands = sum(agent.inventory.count("red") for agent in self.agents)
+
+        total_green = counts["green"] + green_in_hands
+        total_yellow = counts["yellow"] + yellow_in_hands
+        total_red = counts["red"] + red_in_hands
+
+        # If communication is enabled, do NOT stop on local deadlock:
+        # cooperative exchange may still resolve the situation.
+        if self.communication_enabled:
+            return False
+
+        # Deadlock detection only for the no-communication phase
+        if total_red > 0:
+            return False
+
+        if self._can_any_robot_transform("yellow"):
+            return False
+
+        if counts["yellow"] > 0:
+            return False
+
+        if self._can_any_robot_transform("green"):
+            return False
+
+        if counts["green"] > 0:
+            return False
+
+        # No communication + no more reachable progress => deadlock
+        return True
