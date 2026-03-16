@@ -300,12 +300,15 @@ class BaseRobotAgent:
 
     @staticmethod
     def _has_known_target_of_type(known_wastes, shared_targets, wanted_type):
+        # Check locally observed wastes
         for wastes in known_wastes.values():
             if wanted_type in wastes:
                 return True
 
-        for _pos in shared_targets.keys():
-            return True
+        # Check shared targets and ensure they match the wanted type
+        for pos, info in shared_targets.items():
+            if info.get("waste_type") == wanted_type:
+                return True
 
         return False
 
@@ -373,16 +376,30 @@ class BaseRobotAgent:
         receiver_id = candidates[pair_start + 1]
 
         if self_id == donor_id:
+            receiver_state = robot_states.get(receiver_id, {})
+            receiver_pos = receiver_state.get("position")
+
             if position == buffer_pos:
-                if item_type not in current_wastes:
+                # If same-type waste already on the buffer, do not stack another one
+                if item_type in current_wastes:
                     return {
-                        "main": {"type": "drop"},
+                        "main": {"type": "wait"},
                         "reports": [],
                         "status_reports": [],
                         "claim": None,
                     }
+
+                # If receiver is already on the buffer, let it pick first / keep buffer stable
+                if receiver_pos == buffer_pos:
+                    return {
+                        "main": {"type": "wait"},
+                        "reports": [],
+                        "status_reports": [],
+                        "claim": None,
+                    }
+
                 return {
-                    "main": {"type": "wait"},
+                    "main": {"type": "drop"},
                     "reports": [],
                     "status_reports": [],
                     "claim": None,
@@ -405,12 +422,24 @@ class BaseRobotAgent:
             }
 
         if self_id == receiver_id:
-            if position == buffer_pos and item_type in current_wastes:
+            donor_state = robot_states.get(donor_id, {})
+            donor_pos = donor_state.get("position")
+
+            if position == buffer_pos:
+                if item_type in current_wastes:
+                    return {
+                        "main": {"type": "pick"},
+                        "reports": [],
+                        "status_reports": [],
+                        "claim": None,
+                    }
+
+                # Stay on the buffer and wait for donor if donor is still coming
                 return {
-                    "main": {"type": "pick"},
+                    "main": {"type": "wait"},
                     "reports": [],
                     "status_reports": [],
-                    "claim": None,
+                    "claim": {"waste_type": item_type, "position": buffer_pos},
                 }
 
             next_pos = BaseRobotAgent._step_towards(position, buffer_pos, visible, allowed_zones)
@@ -422,6 +451,7 @@ class BaseRobotAgent:
                     "claim": {"waste_type": item_type, "position": buffer_pos},
                 }
 
+            # If cannot move yet, keep claiming the buffer
             return {
                 "main": {"type": "wait"},
                 "reports": [],
