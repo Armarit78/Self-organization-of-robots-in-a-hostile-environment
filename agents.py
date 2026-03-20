@@ -50,6 +50,8 @@ class BaseRobotAgent:
             "hp": BaseRobotAgent.MAX_HP,
             "is_decontaminating": False,
             "decontamination_timer": 0,
+            "base_pos": (0, 0),
+            "waste_outside_zone": [],
         }
 
     def inventory_copy(self):
@@ -76,6 +78,8 @@ class BaseRobotAgent:
         self.knowledge["hp"] = self.hp
         self.knowledge["is_decontaminating"] = self.is_decontaminating
         self.knowledge["decontamination_timer"] = self.decontamination_timer
+        self.knowledge["base_pos"] = percepts.get("base_pos", (0, 0))
+        self.knowledge["waste_outside_zone"] = percepts.get("waste_outside_zone", [])
 
         for pos, cell_info in cells.items():
             wastes = cell_info.get("wastes", [])
@@ -114,7 +118,7 @@ class BaseRobotAgent:
         """
         Si le robot est en décontamination ou n'a plus de HP, il doit :
         1. Lâcher son inventaire (drop forcé)
-        2. Retourner à la base (colonne 0)
+        2. Retourner à la base de sa zone
         3. Attendre 5 steps pour récupérer
         Retourne une action_bundle ou None si le robot n'est pas concerné.
         """
@@ -123,6 +127,7 @@ class BaseRobotAgent:
         position = knowledge["position"]
         visible = knowledge["visible_cells"]
         inventory = knowledge["inventory"]
+        base_pos = knowledge["base_pos"]
 
         # Cas 1 : HP tombé à 0 et le robot porte encore un déchet -> drop forcé
         if hp <= 0 and len(inventory) > 0:
@@ -145,10 +150,8 @@ class BaseRobotAgent:
 
         # Cas 2 : en décontamination, attendre à la base
         if is_decontaminating:
-            # Si pas encore à la base (colonne 0), y aller
-            x, y = position
-            if x > 0:
-                next_pos = BaseRobotAgent._step_towards(position, (0, y), visible, allowed_zones)
+            if position != base_pos:
+                next_pos = BaseRobotAgent._step_towards(position, base_pos, visible, allowed_zones)
                 if next_pos is not None:
                     return {
                         "main": {"type": "move", "to": next_pos},
@@ -164,11 +167,10 @@ class BaseRobotAgent:
                 "claim": None,
             }
 
-        # Cas 3 : HP à 0, inventaire vide -> commencer la décontamination
+        # Cas 3 : HP à 0, inventaire vide -> retourner à la base de sa zone
         if hp <= 0 and len(inventory) == 0:
-            x, y = position
-            if x > 0:
-                next_pos = BaseRobotAgent._step_towards(position, (0, y), visible, allowed_zones)
+            if position != base_pos:
+                next_pos = BaseRobotAgent._step_towards(position, base_pos, visible, allowed_zones)
                 if next_pos is not None:
                     return {
                         "main": {"type": "move", "to": next_pos},
@@ -665,6 +667,19 @@ class greenAgent(BaseRobotAgent):
                     "claim": {"waste_type": "green", "position": target},
                 }
 
+        # Récupération exceptionnelle hors-zone
+        outside = knowledge.get("waste_outside_zone", [])
+        if outside:
+            closest = min(outside, key=lambda p: manhattan(position, p))
+            next_pos = BaseRobotAgent._step_towards(position, closest, visible, allowed_zones=None)
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": None,
+                }
+
         next_pos = BaseRobotAgent._green_rect_patrol_step(knowledge)
 
         if next_pos is not None:
@@ -786,6 +801,19 @@ class yellowAgent(BaseRobotAgent):
                     "claim": {"waste_type": "yellow", "position": target},
                 }
 
+        # Récupération exceptionnelle hors-zone
+        outside = knowledge.get("waste_outside_zone", [])
+        if outside:
+            closest = min(outside, key=lambda p: manhattan(position, p))
+            next_pos = BaseRobotAgent._step_towards(position, closest, visible, allowed_zones=None)
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": None,
+                }
+
         next_pos = BaseRobotAgent._frontier_patrol_step(
             knowledge=knowledge,
             frontier_x=knowledge["z1_end"],
@@ -897,13 +925,27 @@ class redAgent(BaseRobotAgent):
         )
 
         if target is not None:
-            next_pos = BaseRobotAgent._step_towards(position, target, visible, ["z1", "z2", "z3"])
+            # Autoriser toutes les zones car le déchet peut être hors-zone
+            next_pos = BaseRobotAgent._step_towards(position, target, visible, allowed_zones=None)
             if next_pos is not None:
                 return {
                     "main": {"type": "move", "to": next_pos},
                     "reports": reports,
                     "status_reports": status_reports,
                     "claim": {"waste_type": "red", "position": target},
+                }
+
+        # Récupération exceptionnelle hors-zone
+        outside = knowledge.get("waste_outside_zone", [])
+        if outside:
+            closest = min(outside, key=lambda p: manhattan(position, p))
+            next_pos = BaseRobotAgent._step_towards(position, closest, visible, allowed_zones=None)
+            if next_pos is not None:
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": None,
                 }
 
         next_pos = BaseRobotAgent._frontier_patrol_step(

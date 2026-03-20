@@ -50,6 +50,13 @@ class RobotMission:
         self.disposal_pos = (self.width - 1, random.randrange(self.height))
         self.disposal_agent = WasteDisposalZoneAgent()
 
+        # Bases de décontamination : case (0,0) de chaque zone
+        self.base_positions = {
+            "green": (0, 0),
+            "yellow": (self.z1_end + 1, 0),
+            "red": (self.z2_end + 1, 0),
+        }
+
         self.stored_red_waste = 0
         self.message_count = 0
         self.finished_at = None
@@ -327,6 +334,8 @@ class RobotMission:
             "z2_end": self.z2_end,
             "disposal_pos": self.disposal_pos,
             "height": self.height,
+            "base_pos": self.base_positions.get(agent.robot_type, (0, 0)),
+            "waste_outside_zone": self._get_waste_outside_zone(agent),
         }
 
     # ---------------------------------------------------------
@@ -404,6 +413,42 @@ class RobotMission:
         tx, ty = to_pos
         return abs(fx - tx) + abs(fy - ty) == 1
 
+    def _get_waste_outside_zone(self, agent):
+        """Retourne la liste des positions de déchets du type du robot qui sont hors de sa zone."""
+        waste_type = self._waste_type_for_robot(agent)
+        allowed = self._allowed_zones_for(agent)
+        if waste_type is None:
+            return []
+        positions = []
+        for pos, wastes in self.waste_grid.items():
+            zone = self.radioactivity_grid[pos].zone
+            if zone not in allowed:
+                for w in wastes:
+                    if w.waste_type == waste_type:
+                        positions.append(pos)
+                        break
+        return positions
+
+    def _has_waste_of_type_outside_zone(self, waste_type, allowed_zones):
+        """Vérifie s'il existe un déchet du type donné en dehors des zones autorisées."""
+        for pos, wastes in self.waste_grid.items():
+            zone = self.radioactivity_grid[pos].zone
+            if zone not in allowed_zones:
+                for w in wastes:
+                    if w.waste_type == waste_type:
+                        return True
+        return False
+
+    def _waste_type_for_robot(self, agent):
+        """Retourne le type de déchet que ce robot doit récupérer."""
+        if isinstance(agent, greenAgent):
+            return "green"
+        if isinstance(agent, yellowAgent):
+            return "yellow"
+        if isinstance(agent, redAgent):
+            return "red"
+        return None
+
     def _do_move(self, agent, action):
         if "to" not in action:
             return
@@ -418,8 +463,16 @@ class RobotMission:
             return
 
         target_zone = self.radioactivity_grid[target].zone
-        if target_zone not in self._allowed_zones_for(agent):
-            return
+        allowed = self._allowed_zones_for(agent)
+
+        if target_zone not in allowed:
+            # Exception : autoriser la sortie de zone si le robot va chercher
+            # un déchet de son type qui est hors de sa zone
+            waste_type = self._waste_type_for_robot(agent)
+            if waste_type is None:
+                return
+            if not self._has_waste_of_type_outside_zone(waste_type, allowed):
+                return
 
         old_pos = agent.pos
         if old_pos in self.robot_grid and agent in self.robot_grid[old_pos]:
@@ -617,15 +670,15 @@ class RobotMission:
                     agent.hp = 0
                     # Le robot va devoir lâcher son déchet et retourner à la base
                     # La logique de drop est gérée dans deliberate() au prochain step
-                    # On active la décontamination quand l'inventaire est vide
+                    # On active la décontamination quand l'inventaire est vide et à la base
                     if not agent.inventory:
-                        # Inventaire déjà vide (le drop a eu lieu), commencer la décontamination
-                        if agent.pos[0] == 0:
+                        base = self.base_positions.get(agent.robot_type, (0, 0))
+                        if agent.pos == base:
                             agent.is_decontaminating = True
                             agent.decontamination_timer = agent.DECONTAMINATION_DURATION
                             print(
                                 f"[DECONTAM] model_id={self.model_id} step={self.step_count} "
-                                f"robot={agent.unique_id} started decontamination at base"
+                                f"robot={agent.unique_id} started decontamination at base {base}"
                             )
 
     # ---------------------------------------------------------
