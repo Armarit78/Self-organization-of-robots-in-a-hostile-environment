@@ -279,16 +279,16 @@ def run_benchmark(n_runs=30, seed_start=100):
         rows.append(row_p1)
         rows.append(row_p2)
 
-    write_detailed_csv(rows, "benchmark_results_detailed.csv")
-    write_summary_csv(rows, "benchmark_results_summary.csv")
-    write_paired_csv(rows, "benchmark_results_paired.csv")
+    write_detailed_csv(rows, "results/benchmark_results_detailed.csv")
+    write_summary_csv(rows, "results/benchmark_results_summary.csv")
+    write_paired_csv(rows, "results/benchmark_results_paired.csv")
 
     print_summary(rows)
 
     print("\nFiles saved:")
-    print("- benchmark_results_detailed.csv")
-    print("- benchmark_results_summary.csv")
-    print("- benchmark_results_paired.csv")
+    print("- results/benchmark_results_detailed.csv")
+    print("- results/benchmark_results_summary.csv")
+    print("- results/benchmark_results_paired.csv")
 
 
 if __name__ == "__main__":
