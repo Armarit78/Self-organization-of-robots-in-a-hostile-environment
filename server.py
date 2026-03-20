@@ -50,6 +50,9 @@ def cell_symbol(model, pos):
     wastes = model.waste_grid.get(pos, [])
 
     if robots:
+        # Afficher "X" si un robot est contaminé ou en décontamination
+        if any(r.is_decontaminating or r.hp <= 0 for r in robots):
+            return "X"
         if any(isinstance(r, greenAgent) for r in robots):
             return "G"
         if any(isinstance(r, yellowAgent) for r in robots):
@@ -77,6 +80,9 @@ def cell_color(model, pos):
     wastes = model.waste_grid.get(pos, [])
 
     if robots:
+        # Couleur grise si le robot est en décontamination ou contaminé
+        if any(r.is_decontaminating or r.hp <= 0 for r in robots):
+            return "#9e9e9e"
         if any(isinstance(r, greenAgent) for r in robots):
             return "#43a047"
         if any(isinstance(r, yellowAgent) for r in robots):
@@ -189,8 +195,14 @@ def RobotInventories(model, version, title):
 
         for agent in sorted_agents:
             inventory_text = ", ".join(agent.inventory) if agent.inventory else "empty"
+            hp_text = f"HP={agent.hp}/{agent.MAX_HP}"
+            decontam_text = ""
+            if agent.is_decontaminating:
+                decontam_text = f" | DECONTAMINATION ({agent.decontamination_timer} steps)"
+            elif agent.hp <= 0:
+                decontam_text = " | CONTAMINATED"
             solara.Text(
-                f"{agent.unique_id} | type={agent.robot_type} | pos={agent.pos} | inventory=[{inventory_text}]"
+                f"{agent.unique_id} | type={agent.robot_type} | pos={agent.pos} | {hp_text} | inventory=[{inventory_text}]{decontam_text}"
             )
 
 
@@ -200,6 +212,7 @@ def Legend():
         solara.Text("Green robot = G")
         solara.Text("Yellow robot = Y")
         solara.Text("Red robot = R")
+        solara.Text("Contaminated robot = X (grey)")
         solara.Text("Green waste = g")
         solara.Text("Yellow waste = y")
         solara.Text("Red waste = r")

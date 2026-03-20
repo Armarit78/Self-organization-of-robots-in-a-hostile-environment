@@ -13,12 +13,22 @@ def manhattan(a, b):
 
 
 class BaseRobotAgent:
+    # Dégâts par step selon le type de déchet porté
+    CONTAMINATION_DAMAGE = {"green": 1, "yellow": 2, "red": 3}
+    MAX_HP = 20
+    DECONTAMINATION_DURATION = 5  # steps à la base pour récupérer
+
     def __init__(self, unique_id, model):
         self.unique_id = unique_id
         self.model = model
         self.pos = (0, 0)
         self.robot_type = "base"
         self.inventory = []
+
+        # Système de contamination
+        self.hp = BaseRobotAgent.MAX_HP
+        self.is_decontaminating = False
+        self.decontamination_timer = 0
 
         self.knowledge = {
             "self_id": unique_id,
@@ -37,6 +47,9 @@ class BaseRobotAgent:
             "z2_end": None,
             "height": None,
             "frontier_dir": None,
+            "hp": BaseRobotAgent.MAX_HP,
+            "is_decontaminating": False,
+            "decontamination_timer": 0,
         }
 
     def inventory_copy(self):
@@ -59,12 +72,31 @@ class BaseRobotAgent:
         # disposal zone known globally
         self.knowledge["known_disposal_zone"] = percepts.get("disposal_pos")
 
+        # Sync contamination state into knowledge
+        self.knowledge["hp"] = self.hp
+        self.knowledge["is_decontaminating"] = self.is_decontaminating
+        self.knowledge["decontamination_timer"] = self.decontamination_timer
+
         for pos, cell_info in cells.items():
             wastes = cell_info.get("wastes", [])
             if wastes:
                 self.knowledge["known_wastes"][pos] = list(wastes)
             elif pos in self.knowledge["known_wastes"]:
                 del self.knowledge["known_wastes"][pos]
+
+    def apply_contamination(self):
+        """Applique les dégâts de contamination à chaque step si le robot porte un déchet."""
+        if self.is_decontaminating or not self.inventory:
+            return
+
+        # Le déchet le plus dangereux dans l'inventaire détermine les dégâts
+        max_damage = 0
+        for item in self.inventory:
+            damage = BaseRobotAgent.CONTAMINATION_DAMAGE.get(item, 0)
+            if damage > max_damage:
+                max_damage = damage
+
+        self.hp -= max_damage
 
     def step_agent(self):
         percepts = self.model.get_percepts(self)
@@ -76,6 +108,82 @@ class BaseRobotAgent:
     @staticmethod
     def deliberate(knowledge):
         return {"main": {"type": "wait"}, "reports": [], "claim": None}
+
+    @staticmethod
+    def _decontamination_deliberate(knowledge, allowed_zones):
+        """
+        Si le robot est en décontamination ou n'a plus de HP, il doit :
+        1. Lâcher son inventaire (drop forcé)
+        2. Retourner à la base (colonne 0)
+        3. Attendre 5 steps pour récupérer
+        Retourne une action_bundle ou None si le robot n'est pas concerné.
+        """
+        hp = knowledge["hp"]
+        is_decontaminating = knowledge["is_decontaminating"]
+        position = knowledge["position"]
+        visible = knowledge["visible_cells"]
+        inventory = knowledge["inventory"]
+
+        # Cas 1 : HP tombé à 0 et le robot porte encore un déchet -> drop forcé
+        if hp <= 0 and len(inventory) > 0:
+            reports = []
+            # Communiquer la position du déchet qu'on va lâcher
+            if knowledge["communication_enabled"]:
+                for item in inventory:
+                    reports.append({
+                        "waste_type": item,
+                        "position": position,
+                        "distance": 0,
+                        "priority": 3,  # haute priorité
+                    })
+            return {
+                "main": {"type": "drop"},
+                "reports": reports,
+                "status_reports": [],
+                "claim": None,
+            }
+
+        # Cas 2 : en décontamination, attendre à la base
+        if is_decontaminating:
+            # Si pas encore à la base (colonne 0), y aller
+            x, y = position
+            if x > 0:
+                next_pos = BaseRobotAgent._step_towards(position, (0, y), visible, allowed_zones)
+                if next_pos is not None:
+                    return {
+                        "main": {"type": "move", "to": next_pos},
+                        "reports": [],
+                        "status_reports": [],
+                        "claim": None,
+                    }
+            # À la base, on attend
+            return {
+                "main": {"type": "wait"},
+                "reports": [],
+                "status_reports": [],
+                "claim": None,
+            }
+
+        # Cas 3 : HP à 0, inventaire vide -> commencer la décontamination
+        if hp <= 0 and len(inventory) == 0:
+            x, y = position
+            if x > 0:
+                next_pos = BaseRobotAgent._step_towards(position, (0, y), visible, allowed_zones)
+                if next_pos is not None:
+                    return {
+                        "main": {"type": "move", "to": next_pos},
+                        "reports": [],
+                        "status_reports": [],
+                        "claim": None,
+                    }
+            return {
+                "main": {"type": "wait"},
+                "reports": [],
+                "status_reports": [],
+                "claim": None,
+            }
+
+        return None
 
     @staticmethod
     def _step_towards(position, target, visible, allowed_zones=None):
@@ -465,6 +573,11 @@ class greenAgent(BaseRobotAgent):
 
     @staticmethod
     def deliberate(knowledge):
+        # Priorité absolue : gestion de la contamination
+        decontam = BaseRobotAgent._decontamination_deliberate(knowledge, ["z1"])
+        if decontam is not None:
+            return decontam
+
         position = knowledge["position"]
         x, y = position
         inventory = knowledge["inventory"]
@@ -578,6 +691,11 @@ class yellowAgent(BaseRobotAgent):
 
     @staticmethod
     def deliberate(knowledge):
+        # Priorité absolue : gestion de la contamination
+        decontam = BaseRobotAgent._decontamination_deliberate(knowledge, ["z1", "z2"])
+        if decontam is not None:
+            return decontam
+
         position = knowledge["position"]
         x, y = position
         inventory = knowledge["inventory"]
@@ -698,6 +816,11 @@ class redAgent(BaseRobotAgent):
 
     @staticmethod
     def deliberate(knowledge):
+        # Priorité absolue : gestion de la contamination
+        decontam = BaseRobotAgent._decontamination_deliberate(knowledge, ["z1", "z2", "z3"])
+        if decontam is not None:
+            return decontam
+
         position = knowledge["position"]
         inventory = knowledge["inventory"]
         visible = knowledge["visible_cells"]

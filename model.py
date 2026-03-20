@@ -431,6 +431,10 @@ class RobotMission:
         self.robot_grid.setdefault(target, []).append(agent)
 
     def _do_pick(self, agent):
+        # Un robot en décontamination ou sans HP ne peut pas ramasser
+        if agent.is_decontaminating or agent.hp <= 0:
+            return
+
         pos = agent.pos
         wastes = self.waste_grid.get(pos, [])
 
@@ -460,6 +464,8 @@ class RobotMission:
                 return
 
     def _do_transform(self, agent):
+        if agent.is_decontaminating or agent.hp <= 0:
+            return
         if isinstance(agent, greenAgent):
             if agent.inventory.count("green") >= 2:
                 removed = 0
@@ -576,6 +582,9 @@ class RobotMission:
         for agent in self.agents:
             agent.step_agent()
 
+        # Appliquer la contamination et gérer la décontamination
+        self._apply_contamination_all()
+
         self.step_count += 1
         self._cleanup_shared_state()
         self.record_history()
@@ -584,6 +593,40 @@ class RobotMission:
             self.finished_at = self.step_count
         elif self.step_count >= self.max_steps and self.finished_at is None:
             self.finished_at = self.step_count
+
+    def _apply_contamination_all(self):
+        """Applique la contamination à tous les robots et gère la décontamination."""
+        for agent in self.agents:
+            if agent.is_decontaminating:
+                # Le robot est en train de se décontaminer à la base
+                agent.decontamination_timer -= 1
+                if agent.decontamination_timer <= 0:
+                    # Décontamination terminée, le robot récupère tous ses HP
+                    agent.hp = agent.MAX_HP
+                    agent.is_decontaminating = False
+                    agent.decontamination_timer = 0
+                    print(
+                        f"[DECONTAM] model_id={self.model_id} step={self.step_count} "
+                        f"robot={agent.unique_id} fully recovered (HP={agent.hp})"
+                    )
+            else:
+                # Appliquer les dégâts de contamination
+                agent.apply_contamination()
+
+                if agent.hp <= 0:
+                    agent.hp = 0
+                    # Le robot va devoir lâcher son déchet et retourner à la base
+                    # La logique de drop est gérée dans deliberate() au prochain step
+                    # On active la décontamination quand l'inventaire est vide
+                    if not agent.inventory:
+                        # Inventaire déjà vide (le drop a eu lieu), commencer la décontamination
+                        if agent.pos[0] == 0:
+                            agent.is_decontaminating = True
+                            agent.decontamination_timer = agent.DECONTAMINATION_DURATION
+                            print(
+                                f"[DECONTAM] model_id={self.model_id} step={self.step_count} "
+                                f"robot={agent.unique_id} started decontamination at base"
+                            )
 
     # ---------------------------------------------------------
     # Statistics / end condition
