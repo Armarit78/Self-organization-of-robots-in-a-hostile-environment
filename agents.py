@@ -300,31 +300,27 @@ class BaseRobotAgent:
 
     @staticmethod
     def _has_known_target_of_type(known_wastes, shared_targets, wanted_type):
-        # Check locally observed wastes
+        # Local knowledge: explicit waste lists
         for wastes in known_wastes.values():
             if wanted_type in wastes:
                 return True
 
-        # Check shared targets and ensure they match the wanted type
-        for pos, info in shared_targets.items():
-            if info.get("waste_type") == wanted_type:
-                return True
-
-        return False
+        # shared_targets is already filtered by type in model.get_percepts()
+        # green robots receive shared_map["green"], yellow -> ["yellow"], red -> ["red"]
+        return len(shared_targets) > 0
 
     @staticmethod
     def _cooperative_drop_decision(knowledge, item_type, allowed_zones):
         """
-        Pairwise cooperative exchange for isolated items.
+        Safer cooperative exchange for isolated items.
 
-        Rule:
+        Principle:
         - communication must be enabled
-        - robot must hold exactly one isolated item
-        - no known target of same type on map/shared map
-        - robots with one isolated item are sorted by numeric id
-        - each robot gives to the next higher-id robot
-          examples: G1->G2, G2->G3, G3->G4
-        - the donor drops on buffer, the receiver goes to buffer and picks
+        - robot must hold exactly one item of the given type
+        - no known compatible target already exists
+        - choose the closest same-type partner carrying exactly one item
+        - lower numeric id = donor, higher numeric id = receiver
+        - donor drops on the buffer, receiver picks from the buffer
         """
         if not knowledge["communication_enabled"]:
             return None
@@ -344,53 +340,55 @@ class BaseRobotAgent:
         if inventory.count(item_type) != 1:
             return None
 
-        # Avoid cooperation if another compatible waste is already known
+        # If a real compatible target already exists, do not force cooperation
         if BaseRobotAgent._has_known_target_of_type(known_wastes, shared_targets, item_type):
             return None
 
-        # Same-type robots carrying exactly one isolated item
-        candidates = []
+        # Find the nearest same-type partner carrying exactly one item
+        partners = []
         for robot_id, state in robot_states.items():
-            if state.get("inventory_count", 0) == 1:
-                candidates.append(robot_id)
+            if robot_id == self_id:
+                continue
+            if state.get("inventory_count", 0) != 1:
+                continue
 
-        if self_id not in candidates:
-            candidates.append(self_id)
+            partner_pos = state.get("position")
+            if partner_pos is None:
+                continue
 
-        candidates = sorted(set(candidates), key=BaseRobotAgent._robot_numeric_id)
+            partners.append(
+                (
+                    manhattan(position, partner_pos),
+                    BaseRobotAgent._robot_numeric_id(robot_id),
+                    robot_id,
+                    partner_pos,
+                )
+            )
 
-        if len(candidates) < 2:
+        if not partners:
             return None
+
+        partners.sort()
+        _, partner_num, partner_id, partner_pos = partners[0]
+
+        self_num = BaseRobotAgent._robot_numeric_id(self_id)
+
+        if self_num < partner_num:
+            donor_id = self_id
+            receiver_id = partner_id
+        else:
+            donor_id = partner_id
+            receiver_id = self_id
 
         current_wastes = visible.get(position, {}).get("wastes", [])
 
-        my_index = candidates.index(self_id)
-
-        # Build disjoint pairs: (0,1), (2,3), (4,5), ...
-        pair_start = (my_index // 2) * 2
-
-        if pair_start + 1 >= len(candidates):
-            return None
-
-        donor_id = candidates[pair_start]
-        receiver_id = candidates[pair_start + 1]
-
+        # -------------------------
+        # DONOR
+        # -------------------------
         if self_id == donor_id:
-            receiver_state = robot_states.get(receiver_id, {})
-            receiver_pos = receiver_state.get("position")
-
             if position == buffer_pos:
-                # If same-type waste already on the buffer, do not stack another one
+                # Avoid stacking multiple same-type items on the buffer
                 if item_type in current_wastes:
-                    return {
-                        "main": {"type": "wait"},
-                        "reports": [],
-                        "status_reports": [],
-                        "claim": None,
-                    }
-
-                # If receiver is already on the buffer, let it pick first / keep buffer stable
-                if receiver_pos == buffer_pos:
                     return {
                         "main": {"type": "wait"},
                         "reports": [],
@@ -421,10 +419,10 @@ class BaseRobotAgent:
                 "claim": None,
             }
 
+        # -------------------------
+        # RECEIVER
+        # -------------------------
         if self_id == receiver_id:
-            donor_state = robot_states.get(donor_id, {})
-            donor_pos = donor_state.get("position")
-
             if position == buffer_pos:
                 if item_type in current_wastes:
                     return {
@@ -434,7 +432,6 @@ class BaseRobotAgent:
                         "claim": None,
                     }
 
-                # Stay on the buffer and wait for donor if donor is still coming
                 return {
                     "main": {"type": "wait"},
                     "reports": [],
@@ -451,7 +448,6 @@ class BaseRobotAgent:
                     "claim": {"waste_type": item_type, "position": buffer_pos},
                 }
 
-            # If cannot move yet, keep claiming the buffer
             return {
                 "main": {"type": "wait"},
                 "reports": [],
@@ -465,6 +461,7 @@ class greenAgent(BaseRobotAgent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.robot_type = "green"
+        self.knowledge["robot_type"] = self.robot_type
 
     @staticmethod
     def deliberate(knowledge):
@@ -577,6 +574,7 @@ class yellowAgent(BaseRobotAgent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.robot_type = "yellow"
+        self.knowledge["robot_type"] = self.robot_type
 
     @staticmethod
     def deliberate(knowledge):
@@ -696,11 +694,11 @@ class redAgent(BaseRobotAgent):
     def __init__(self, unique_id, model):
         super().__init__(unique_id, model)
         self.robot_type = "red"
+        self.knowledge["robot_type"] = self.robot_type
 
     @staticmethod
     def deliberate(knowledge):
         position = knowledge["position"]
-        x, y = position
         inventory = knowledge["inventory"]
         visible = knowledge["visible_cells"]
         known_wastes = knowledge["known_wastes"]
@@ -709,24 +707,61 @@ class redAgent(BaseRobotAgent):
         disposal_pos = knowledge["known_disposal_zone"]
         self_id = knowledge["self_id"]
 
+        reports = []
+        status_reports = []
+
+        if knowledge["communication_enabled"]:
+            reports.extend(BaseRobotAgent._visible_reports(position, visible, "red", priority=3))
+            status_reports.append({
+                "robot_type": "red",
+                "robot_id": self_id,
+                "position": position,
+                "inventory_count": inventory.count("red"),
+            })
+
         current_cell = visible.get(position, {})
         current_wastes = current_cell.get("wastes", [])
 
         if "red" in inventory and current_cell.get("disposal_zone", False):
-            return {"main": {"type": "drop"}, "reports": [], "claim": None}
+            return {
+                "main": {"type": "drop"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
         if "red" in inventory and disposal_pos is not None:
             if position == disposal_pos:
-                return {"main": {"type": "drop"}, "reports": [], "claim": None}
+                return {
+                    "main": {"type": "drop"},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": None,
+                }
 
             next_pos = BaseRobotAgent._step_towards(position, disposal_pos, visible, ["z1", "z2", "z3"])
             if next_pos is not None:
-                return {"main": {"type": "move", "to": next_pos}, "reports": [], "claim": None}
+                return {
+                    "main": {"type": "move", "to": next_pos},
+                    "reports": reports,
+                    "status_reports": status_reports,
+                    "claim": None,
+                }
 
-            return {"main": {"type": "wait"}, "reports": [], "claim": None}
+            return {
+                "main": {"type": "wait"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
         if "red" in current_wastes:
-            return {"main": {"type": "pick"}, "reports": [], "claim": None}
+            return {
+                "main": {"type": "pick"},
+                "reports": reports,
+                "status_reports": status_reports,
+                "claim": None,
+            }
 
         target = BaseRobotAgent._best_unclaimed_target(
             self_id=self_id,
@@ -743,12 +778,11 @@ class redAgent(BaseRobotAgent):
             if next_pos is not None:
                 return {
                     "main": {"type": "move", "to": next_pos},
-                    "reports": [],
+                    "reports": reports,
+                    "status_reports": status_reports,
                     "claim": {"waste_type": "red", "position": target},
                 }
 
-        # phase 1 / no known target:
-        # patrol along the z2/z3 frontier to eventually find red wastes
         next_pos = BaseRobotAgent._frontier_patrol_step(
             knowledge=knowledge,
             frontier_x=knowledge["z2_end"],
@@ -758,8 +792,14 @@ class redAgent(BaseRobotAgent):
         if next_pos is not None:
             return {
                 "main": {"type": "move", "to": next_pos},
-                "reports": [],
+                "reports": reports,
+                "status_reports": status_reports,
                 "claim": None,
             }
 
-        return {"main": {"type": "wait"}, "reports": [], "claim": None}
+        return {
+            "main": {"type": "wait"},
+            "reports": reports,
+            "status_reports": status_reports,
+            "claim": None,
+        }

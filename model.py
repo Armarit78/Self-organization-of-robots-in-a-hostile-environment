@@ -90,6 +90,10 @@ class RobotMission:
             "messages": [],
         }
 
+        # Deadlock / no-progress tracking
+        self.last_progress_step = 0
+        self.deadlock_patience = 25 if communication_enabled else 0
+
         self._create_environment()
         self._create_initial_wastes(n_initial_green_wastes)
         self._create_robots(n_green_robots, n_yellow_robots, n_red_robots)
@@ -194,6 +198,7 @@ class RobotMission:
         existing = self.shared_map[waste_type].get(position)
 
         new_report = {
+            "waste_type": waste_type,
             "last_seen": self.step_count,
             "reporter": reporter_id,
             "distance": report.get("distance", 0),
@@ -252,6 +257,9 @@ class RobotMission:
         if robot_type == "yellow":
             return any(agent.inventory.count("yellow") >= 2 for agent in self.agents if isinstance(agent, yellowAgent))
         return False
+
+    def _mark_progress(self):
+        self.last_progress_step = self.step_count
 
     # ---------------------------------------------------------
     # Percepts
@@ -442,12 +450,13 @@ class RobotMission:
                 if not wastes:
                     del self.waste_grid[pos]
 
-                # if target was shared/claimed, clear it
                 if needed_type in ["green", "yellow", "red"]:
                     if pos in self.shared_map[needed_type]:
                         del self.shared_map[needed_type][pos]
                     if pos in self.claims[needed_type]:
                         del self.claims[needed_type][pos]
+
+                self._mark_progress()
                 return
 
     def _do_transform(self, agent):
@@ -463,6 +472,7 @@ class RobotMission:
                 new_inventory.append("yellow")
                 agent.inventory = new_inventory
                 self._release_claim_if_any(agent.unique_id, "green")
+                self._mark_progress()
 
         elif isinstance(agent, yellowAgent):
             if agent.inventory.count("yellow") >= 2:
@@ -476,10 +486,12 @@ class RobotMission:
                 new_inventory.append("red")
                 agent.inventory = new_inventory
                 self._release_claim_if_any(agent.unique_id, "yellow")
+                self._mark_progress()
 
     def _do_drop(self, agent):
         pos = agent.pos
 
+        # Red robot storing final red waste
         if isinstance(agent, redAgent) and pos == self.disposal_pos and "red" in agent.inventory:
             agent.inventory.remove("red")
             self.stored_red_waste += 1
@@ -488,13 +500,37 @@ class RobotMission:
                 f"robot={agent.unique_id} stored_red_waste={self.stored_red_waste}"
             )
             self._release_claim_if_any(agent.unique_id, "red")
+            self._mark_progress()
             return
 
         if not agent.inventory:
             return
 
-        item = agent.inventory.pop(0)
+        # Drop the item that matches the robot's current mission logic
+        item = None
+
+        if isinstance(agent, greenAgent):
+            if "yellow" in agent.inventory:
+                item = "yellow"
+            elif "green" in agent.inventory:
+                item = "green"
+
+        elif isinstance(agent, yellowAgent):
+            if "red" in agent.inventory:
+                item = "red"
+            elif "yellow" in agent.inventory:
+                item = "yellow"
+
+        elif isinstance(agent, redAgent):
+            if "red" in agent.inventory:
+                item = "red"
+
+        if item is None:
+            return
+
+        agent.inventory.remove(item)
         self.waste_grid.setdefault(pos, []).append(WasteAgent(item))
+        self._mark_progress()
 
         # publish useful intermediate waste automatically only when relevant
         if item == "green" and self.communication_enabled:
@@ -582,7 +618,7 @@ class RobotMission:
         if self.step_count >= self.max_steps:
             return True
 
-        # Success criterion: stop as soon as enough red waste is stored
+        # Success criterion
         if self.stored_red_waste >= self.expected_stored_red:
             return True
 
@@ -596,26 +632,32 @@ class RobotMission:
         total_yellow = counts["yellow"] + yellow_in_hands
         total_red = counts["red"] + red_in_hands
 
-        # If communication is enabled, do NOT stop on local deadlock:
-        # cooperative exchange may still resolve the situation.
-        if self.communication_enabled:
-            return False
-
-        # Deadlock detection only for the no-communication phase
+        # If red already exists somewhere, phase can still progress
         if total_red > 0:
             return False
 
+        # If a yellow robot can still transform, phase can still progress
         if self._can_any_robot_transform("yellow"):
             return False
 
+        # If yellow wastes still exist on the grid, phase can still progress
         if counts["yellow"] > 0:
             return False
 
+        # If a green robot can still transform, phase can still progress
         if self._can_any_robot_transform("green"):
             return False
 
+        # If green wastes still exist on the grid, phase can still progress
         if counts["green"] > 0:
             return False
 
-        # No communication + no more reachable progress => deadlock
+        # Phase 2: allow a short recovery window for cooperation,
+        # but stop if there has been no real material progress
+        if self.communication_enabled:
+            steps_without_progress = self.step_count - self.last_progress_step
+            if steps_without_progress <= self.deadlock_patience:
+                return False
+
+        # No more reachable progress
         return True
