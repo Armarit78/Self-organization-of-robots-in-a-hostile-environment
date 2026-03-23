@@ -379,6 +379,8 @@ Les deux simulations sont exécutées en parallèle avec les mêmes conditions i
 
 ### Grille
 
+![Phase comparison grid](./images/phase_comparison_grid.png)
+
 - cellules vertes, jaunes, rouges  
 - robots G, Y, R  
 - déchets g, y, r  
@@ -387,6 +389,8 @@ Les deux simulations sont exécutées en parallèle avec les mêmes conditions i
 ---
 
 ### Graphique dynamique
+
+![Phase comparison chart](./images/phase_comparison_chart.png)
 
 Suivi :
 
