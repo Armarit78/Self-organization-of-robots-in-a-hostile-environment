@@ -1,12 +1,8 @@
 # ============================================================
-# Group: GROUP_NUMBER
-# Date: DATE
-# Members: MEMBER_1, MEMBER_2, MEMBER_3
+# Group: 30
+# Members: Christophe BOSHRA, Guillaume PORET
 # File: agents.py
 # ============================================================
-
-import random
-
 
 def manhattan(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])

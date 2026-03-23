@@ -1,7 +1,6 @@
 # ============================================================
-# Group: GROUP_NUMBER
-# Date: DATE
-# Members: MEMBER_1, MEMBER_2, MEMBER_3
+# Group: 30
+# Members: Christophe BOSHRA, Guillaume PORET
 # File: model.py
 # ============================================================
 
@@ -581,7 +580,13 @@ class RobotMission:
         self.record_history()
 
         if self.is_finished() and self.finished_at is None:
-            self.finished_at = self.step_count
+            # succès atteint
+            if self.stored_red_waste >= self.expected_stored_red:
+                self.finished_at = self.step_count
+            # sinon = deadlock → forcer max_steps
+            else:
+                self.finished_at = self.max_steps
+
         elif self.step_count >= self.max_steps and self.finished_at is None:
             self.finished_at = self.step_count
 
