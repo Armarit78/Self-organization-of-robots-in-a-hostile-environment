@@ -1,14 +1,12 @@
 # ============================================================
-# Group: GROUP_NUMBER
-# Date: DATE
-# Members: MEMBER_1, MEMBER_2, MEMBER_3
+# Group: 30
+# Members: Christophe BOSHRA, Guillaume PORET
 # File: run.py
 # ============================================================
 import os
 
 def main():
-    print("Launch the simulation with:")
-    # print("python -m solara run server.py")
+    print("Launching the server...")
     os.system("solara run server.py")
 
 
