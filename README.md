@@ -43,3 +43,8 @@ Version étendue introduisant de nouvelles contraintes :
 
 → Détails complets disponibles ici :  
 [README Version 2](./Version%202%20-%20Contamination/README_V2.md)
+
+## Auteurs
+- Guillaume PORET  
+- Christophe BOSHRA  
+- Groupe 30
