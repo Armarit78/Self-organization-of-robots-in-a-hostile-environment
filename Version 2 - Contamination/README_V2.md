@@ -557,28 +557,31 @@ Mesures collectées :
 
 ## 9. Visualisation de la simulation
 
-### Capture de la simulation
+### Interface Solara
 
-![Capture de la simulation](./images/capture%20full.jpg)
+L'interface web permet de comparer les deux phases en temps réel avec des contrôles interactifs (step, auto-play, reset, vitesse).
 
-- cellules vertes, jaunes, rouges : zones z1, z2, z3
-- robots G, Y, R : agents verts, jaunes, rouges
-- déchets g, y, r : déchets correspondants
-- D : zone de stockage
-- Bases de régénération sur la dernière ligne
+#### Tableau comparatif, grilles et barres de vie
+
+![Interface - Grilles et robots](./images/part1.jpg)
+
+L'interface affiche :
+
+- Un **tableau comparatif** Phase 1 vs Phase 2 (step, status, déchets, stockés, messages)
+- Les **grilles côte à côte** avec les zones colorées (z1 vert, z2 jaune, z3 rouge), robots (G/Y/R), déchets (g/y/r), bases (Bv/By/Br), zone de stockage (D) et robots KO en noir
+- Un **tableau de statut des robots** par phase avec **barres de vie** (HP), position, état OK/KO et inventaire
 
 ---
 
-### Graphique dynamique
+#### Graphiques de suivi et messages
 
-![Graphique dynamique](./images/chart.jpg)
+![Interface - Graphiques](./images/part2.jpg)
 
-Suivi :
+Les graphiques sont **séparés par phase** pour une meilleure lisibilité :
 
-- déchets verts sur la grille
-- déchets jaunes sur la grille
-- déchets rouges sur la grille
-- stockage cumulé de déchets rouges
+- **Phase 1 - Déchets** : évolution des déchets verts, jaunes, rouges sur la grille et rouges stockés (on observe la stagnation rapide)
+- **Phase 2 - Déchets** : même suivi, montrant la progression régulière jusqu'au succès
+- **Messages cumulés** : comparaison du volume de communication entre les deux phases
 
 ---
 
