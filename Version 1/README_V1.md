@@ -1,7 +1,7 @@
 # Mission Robot MAS 2026 --- (Version V1)
 
 Guillaume PORET
-Chriss Boshra
+Christophe BOSHRA
 Groupe 30
 
 ## 1. Vue d’ensemble du projet

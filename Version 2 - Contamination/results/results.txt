@@ -1,0 +1,16 @@
+=== BENCHMARK SUMMARY ===
+Phase 1 - avg steps: 64.17
+Phase 2 - avg steps: 80.67
+Phase 1 - avg stored red: 3.57
+Phase 2 - avg stored red: 3.87
+Phase 1 - avg completion ratio: 0.9189
+Phase 2 - avg completion ratio: 1.0000
+Phase 1 - avg efficiency: 0.055032
+Phase 2 - avg efficiency: 0.053261
+Phase 1 - avg messages: 0.00
+Phase 2 - avg messages: 702.60
+Phase 1 - finish rate: 70.0%
+Phase 2 - finish rate: 100.0%
+Phase 1 - success rate: 70.0%
+Phase 2 - success rate: 100.0%
+Phase 2 improvement vs Phase 1: -25.71% fewer steps on average
