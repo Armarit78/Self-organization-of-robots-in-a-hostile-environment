@@ -7,8 +7,7 @@
 import os
 
 def main():
-    print("Launch the simulation with:")
-    #print("python -m solara run server.py")
+    print("Running the simulation...")
     os.system("python -m solara run server.py")
 
 if __name__ == "__main__":
