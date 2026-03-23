@@ -1,7 +1,6 @@
 # ============================================================
-# Group: GROUP_NUMBER
-# Date: DATE
-# Members: MEMBER_1, MEMBER_2, MEMBER_3
+# Group: 30
+# Members: Christophe BOSHRA, Guillaume PORET
 # File: model.py
 # ============================================================
 

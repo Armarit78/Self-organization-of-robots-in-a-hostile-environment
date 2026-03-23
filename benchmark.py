@@ -1,7 +1,6 @@
 # ============================================================
-# Group: GROUP_NUMBER
-# Date: DATE
-# Members: MEMBER_1, MEMBER_2, MEMBER_3
+# Group: 30
+# Members: Christophe BOSHRA, Guillaume PORET
 # File: benchmark.py
 # ============================================================
 
@@ -18,7 +17,7 @@ DEFAULT_PARAMS = dict(
     n_green_robots=3,
     n_yellow_robots=2,
     n_red_robots=2,
-    max_steps=2000,
+    max_steps=250,
 )
 
 
