@@ -46,6 +46,14 @@ def cell_symbol(model, pos):
     if pos == model.disposal_pos:
         return "D"
 
+    if hasattr(model, "base_positions"):
+        if pos == model.base_positions.get("green"):
+            return "Bv"
+        if pos == model.base_positions.get("yellow"):
+            return "By"
+        if pos == model.base_positions.get("red"):
+            return "Br"
+
     robots = model.robot_grid.get(pos, [])
     wastes = model.waste_grid.get(pos, [])
 
@@ -73,16 +81,25 @@ def cell_color(model, pos):
     if pos == model.disposal_pos:
         return "#212121"
 
+    if hasattr(model, "base_positions"):
+        if pos == model.base_positions.get("green"):
+            return "#1b5e20"
+        if pos == model.base_positions.get("yellow"):
+            return "#f57f17"
+        if pos == model.base_positions.get("red"):
+            return "#b71c1c"
+
     robots = model.robot_grid.get(pos, [])
     wastes = model.waste_grid.get(pos, [])
 
     if robots:
-        if any(isinstance(r, greenAgent) for r in robots):
-            return "#43a047"
-        if any(isinstance(r, yellowAgent) for r in robots):
-            return "#fbc02d"
-        if any(isinstance(r, redAgent) for r in robots):
-            return "#e53935"
+        for r in robots:
+            if isinstance(r, greenAgent):
+                return "#1b5e20" if not getattr(r, "is_ko", False) else "#000000"
+            if isinstance(r, yellowAgent):
+                return "#fbc02d" if not getattr(r, "is_ko", False) else "#000000"
+            if isinstance(r, redAgent):
+                return "#c62828" if not getattr(r, "is_ko", False) else "#000000"
 
     if wastes:
         types = [w.waste_type for w in wastes]
@@ -189,8 +206,11 @@ def RobotInventories(model, version, title):
 
         for agent in sorted_agents:
             inventory_text = ", ".join(agent.inventory) if agent.inventory else "empty"
+            ko_text = f" | KO({agent.ko_remaining_steps})" if getattr(agent, "is_ko", False) else ""
             solara.Text(
-                f"{agent.unique_id} | type={agent.robot_type} | pos={agent.pos} | inventory=[{inventory_text}]"
+                f"{agent.unique_id} | type={agent.robot_type} | pos={agent.pos} "
+                f"| res={getattr(agent, 'resistance', 0)}/{getattr(agent, 'max_resistance', 0)}"
+                f"{ko_text} | inventory=[{inventory_text}]"
             )
 
 
@@ -204,6 +224,10 @@ def Legend():
         solara.Text("Yellow waste = y")
         solara.Text("Red waste = r")
         solara.Text("Disposal zone = D")
+        solara.Text("Green base = Bv")
+        solara.Text("Yellow base = By")
+        solara.Text("Red base = Br")
+        solara.Text("KO robot = ✖")
 
 
 @solara.component

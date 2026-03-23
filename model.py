@@ -7,7 +7,13 @@
 
 import random
 
-from agents import greenAgent, yellowAgent, redAgent
+from agents import (
+    greenAgent,
+    yellowAgent,
+    redAgent,
+    BASE_REGEN_PER_STEP,
+    KO_RECOVERY_STEPS,
+)
 from objects import RadioactivityAgent, WasteAgent, WasteDisposalZoneAgent
 
 
@@ -49,10 +55,16 @@ class RobotMission:
 
         self.disposal_pos = (self.width - 1, random.randrange(self.height))
         self.disposal_agent = WasteDisposalZoneAgent()
+        self.base_positions = {
+            "green": (0, self.height - 1),
+            "yellow": (self.z1_end, self.height - 1),
+            "red": (self.z2_end, self.height - 1),
+        }
 
         self.stored_red_waste = 0
         self.message_count = 0
         self.finished_at = None
+        self.irreversible_deadlock = False
 
         # important for your current setup:
         # 4 green -> 1 stored red
@@ -77,6 +89,14 @@ class RobotMission:
             "yellow": {},
             "red": {},
         }
+
+        # KO recovery tasks queue
+        self.ko_recovery_queue = {
+            "green": [],
+            "yellow": [],
+            "red": [],
+        }
+        self.next_ko_task_id = 1
 
         self.report_ttl = 20
         self.claim_ttl = 8
@@ -162,7 +182,11 @@ class RobotMission:
             # remove outdated reports
             for pos in list(self.shared_map[waste_type].keys()):
                 report = self.shared_map[waste_type][pos]
-                if self.step_count - report["last_seen"] > self.report_ttl:
+                ttl = self.report_ttl
+                if report.get("source") == "ko_drop":
+                    ttl = self.report_ttl * 3
+
+                if self.step_count - report["last_seen"] > ttl:
                     del self.shared_map[waste_type][pos]
 
             # remove outdated claims
@@ -203,6 +227,7 @@ class RobotMission:
             "reporter": reporter_id,
             "distance": report.get("distance", 0),
             "priority": report.get("priority", 1),
+            "source": report.get("source"),
         }
 
         if existing != new_report:
@@ -233,6 +258,9 @@ class RobotMission:
             return (self.z2_end, self.height // 2)
         return None
 
+    def _base_pos_for(self, robot_type):
+        return self.base_positions.get(robot_type)
+
     def _publish_robot_status(self, robot_id, robot_type, position, inventory_count):
         if not self.communication_enabled:
             return
@@ -251,6 +279,78 @@ class RobotMission:
 
         self.shared_robot_state[robot_type][robot_id] = new_state
 
+    def _create_ko_task(self, waste_type, position, reporter_id):
+        if waste_type not in ["green", "yellow", "red"]:
+            return
+
+        task = {
+            "task_id": self.next_ko_task_id,
+            "waste_type": waste_type,
+            "position": tuple(position),
+            "created_at": self.step_count,
+            "reporter_id": reporter_id,
+            "assigned_to": None,
+            "assigned_at": None,
+            "resolved": False,
+        }
+        self.next_ko_task_id += 1
+        self.ko_recovery_queue[waste_type].append(task)
+
+    def _claim_ko_task(self, robot_id, waste_type, task_id):
+        if waste_type not in ["green", "yellow", "red"]:
+            return
+
+        for task in self.ko_recovery_queue[waste_type]:
+            if task["task_id"] == task_id and not task["resolved"]:
+                # already mine -> refresh
+                if task["assigned_to"] == robot_id:
+                    task["assigned_at"] = self.step_count
+                    return
+
+                # free -> take it
+                if task["assigned_to"] is None:
+                    task["assigned_to"] = robot_id
+                    task["assigned_at"] = self.step_count
+                    return
+
+    def _release_ko_tasks_of_robot(self, robot_id):
+        for waste_type in ["green", "yellow", "red"]:
+            for task in self.ko_recovery_queue[waste_type]:
+                if task["assigned_to"] == robot_id and not task["resolved"]:
+                    task["assigned_to"] = None
+                    task["assigned_at"] = None
+
+    def _resolve_ko_tasks_at_position(self, waste_type, position):
+        if waste_type not in ["green", "yellow", "red"]:
+            return
+
+        remaining = [w.waste_type for w in self.waste_grid.get(position, [])]
+
+        # if no more such waste on the tile, all matching tasks are resolved
+        if waste_type not in remaining:
+            for task in self.ko_recovery_queue[waste_type]:
+                if task["position"] == tuple(position):
+                    task["resolved"] = True
+
+    def _cleanup_ko_queue(self):
+        for waste_type in ["green", "yellow", "red"]:
+            cleaned = []
+            for task in self.ko_recovery_queue[waste_type]:
+                if task["resolved"]:
+                    continue
+
+                # if assigned robot has disappeared from shared state too long, free the task
+                assigned_to = task["assigned_to"]
+                if assigned_to is not None:
+                    state = self.shared_robot_state[waste_type].get(assigned_to)
+                    if state is None or (self.step_count - state["last_seen"] > self.report_ttl):
+                        task["assigned_to"] = None
+                        task["assigned_at"] = None
+
+                cleaned.append(task)
+
+            self.ko_recovery_queue[waste_type] = cleaned
+
     def _can_any_robot_transform(self, robot_type):
         if robot_type == "green":
             return any(agent.inventory.count("green") >= 2 for agent in self.agents if isinstance(agent, greenAgent))
@@ -260,6 +360,103 @@ class RobotMission:
 
     def _mark_progress(self):
         self.last_progress_step = self.step_count
+
+    def _inventory_damage_for(self, agent):
+        return len(agent.inventory) * agent.damage_per_item_per_step
+
+    def _broadcast_ko_drop(self, agent, dropped_items, pos):
+        if not self.communication_enabled:
+            return
+        if not dropped_items:
+            return
+
+        # seule communication autorisée pendant le KO :
+        # "je suis KO, j'ai drop ici"
+        for item in dropped_items:
+            if item not in ["green", "yellow", "red"]:
+                continue
+
+            self._publish_report(
+                reporter_id=agent.unique_id,
+                waste_type=item,
+                position=pos,
+                report={
+                    "distance": 0,
+                    "priority": 10,
+                    "source": "ko_drop",
+                },
+            )
+
+            self._create_ko_task(
+                waste_type=item,
+                position=pos,
+                reporter_id=agent.unique_id,
+            )
+
+    def _drop_all_inventory_due_to_ko(self, agent):
+        if not agent.inventory:
+            return
+
+        pos = agent.pos
+        dropped_items = list(agent.inventory)
+
+        for item in dropped_items:
+            self.waste_grid.setdefault(pos, []).append(WasteAgent(item))
+
+        # Deadlock rule for phase 1 / no communication: if a yellow robot dies while carrying a red waste, no red robot can be alerted to recover it.
+        if (not self.communication_enabled
+                and isinstance(agent, yellowAgent)
+                and "red" in dropped_items):
+            self.irreversible_deadlock = True
+
+        agent.inventory.clear()
+
+        self._release_claim_if_any(agent.unique_id, "green")
+        self._release_claim_if_any(agent.unique_id, "yellow")
+        self._release_claim_if_any(agent.unique_id, "red")
+
+        self._broadcast_ko_drop(agent, dropped_items, pos)
+
+    def _update_robot_resistance(self, agent):
+        base_pos = self._base_pos_for(agent.robot_type)
+
+        # 1) Base = full heal immédiat, même hors KO
+        if agent.pos == base_pos:
+            agent.resistance = agent.max_resistance
+
+            # Si le robot est KO, il doit quand même attendre à la base
+            if agent.is_ko:
+                if agent.ko_remaining_steps > 0:
+                    agent.ko_remaining_steps -= 1
+
+                if agent.ko_remaining_steps <= 0:
+                    agent.is_ko = False
+
+            return
+
+        # 2) Si KO et pas encore à la base : pas de regen, pas d'action normale
+        if agent.is_ko:
+            return
+
+        # 3) Robot normal hors base
+        # dégâts si inventaire non vide
+        if agent.inventory:
+            agent.resistance -= self._inventory_damage_for(agent)
+        else:
+            # regen naturelle si inventaire vide
+            if agent.resistance < agent.max_resistance:
+                agent.resistance = min(
+                    agent.max_resistance,
+                    agent.resistance + BASE_REGEN_PER_STEP
+                )
+
+        # 4) Passage en KO
+        if agent.resistance <= 0:
+            agent.resistance = 0
+            agent.is_ko = True
+            agent.ko_remaining_steps = KO_RECOVERY_STEPS
+            self._release_ko_tasks_of_robot(agent.unique_id)
+            self._drop_all_inventory_due_to_ko(agent)
 
     # ---------------------------------------------------------
     # Percepts
@@ -327,6 +524,14 @@ class RobotMission:
             "z2_end": self.z2_end,
             "disposal_pos": self.disposal_pos,
             "height": self.height,
+
+            # V2 KO / resistance
+            "base_pos": self._base_pos_for(agent.robot_type),
+            "resistance": agent.resistance,
+            "max_resistance": agent.max_resistance,
+            "is_ko": agent.is_ko,
+            "ko_remaining_steps": agent.ko_remaining_steps,
+            "ko_tasks": [dict(task) for task in self.ko_recovery_queue.get(agent.robot_type, [])],
         }
 
     # ---------------------------------------------------------
@@ -348,7 +553,14 @@ class RobotMission:
         reports = action_bundle.get("reports", [])
         status_reports = action_bundle.get("status_reports", [])
         claim = action_bundle.get("claim")
+        ko_claim = action_bundle.get("ko_claim")
         main_action = action_bundle.get("main", {"type": "wait"})
+
+        if agent.is_ko:
+            reports = []
+            status_reports = []
+            claim = None
+            ko_claim = None
 
         # communication does not consume the turn anymore
         for report in reports:
@@ -374,6 +586,13 @@ class RobotMission:
                 position=claim.get("position"),
             )
 
+        if ko_claim is not None:
+            self._claim_ko_task(
+                robot_id=agent.unique_id,
+                waste_type=ko_claim.get("waste_type"),
+                task_id=ko_claim.get("task_id"),
+            )
+
         action_type = main_action.get("type", "wait")
 
         if action_type == "move":
@@ -388,6 +607,7 @@ class RobotMission:
             pass
 
         self._cleanup_shared_state()
+        self._cleanup_ko_queue()
         return self.get_percepts(agent)
 
     def _allowed_zones_for(self, agent):
@@ -431,6 +651,9 @@ class RobotMission:
         self.robot_grid.setdefault(target, []).append(agent)
 
     def _do_pick(self, agent):
+        if agent.is_ko:
+            return
+
         pos = agent.pos
         wastes = self.waste_grid.get(pos, [])
 
@@ -456,10 +679,15 @@ class RobotMission:
                     if pos in self.claims[needed_type]:
                         del self.claims[needed_type][pos]
 
+                    self._resolve_ko_tasks_at_position(needed_type, pos)
+
                 self._mark_progress()
                 return
 
     def _do_transform(self, agent):
+        if agent.is_ko:
+            return
+
         if isinstance(agent, greenAgent):
             if agent.inventory.count("green") >= 2:
                 removed = 0
@@ -489,6 +717,9 @@ class RobotMission:
                 self._mark_progress()
 
     def _do_drop(self, agent):
+        if agent.is_ko:
+            return
+
         pos = agent.pos
 
         # Red robot storing final red waste
@@ -575,13 +806,20 @@ class RobotMission:
         random.shuffle(self.agents)
         for agent in self.agents:
             agent.step_agent()
+            self._update_robot_resistance(agent)
 
         self.step_count += 1
         self._cleanup_shared_state()
         self.record_history()
 
         if self.is_finished() and self.finished_at is None:
-            self.finished_at = self.step_count
+
+            if not self.communication_enabled and self.stored_red_waste < self.expected_stored_red:
+                self.finished_at = self.max_steps
+                self.step_count = self.max_steps
+            else:
+                self.finished_at = self.step_count
+
         elif self.step_count >= self.max_steps and self.finished_at is None:
             self.finished_at = self.step_count
 
@@ -615,6 +853,9 @@ class RobotMission:
         self.history["messages"].append(self.message_count)
 
     def is_finished(self):
+        if self.irreversible_deadlock:
+            return True
+
         if self.step_count >= self.max_steps:
             return True
 
